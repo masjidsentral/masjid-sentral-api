@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-29",
+  "vars": {
+    "IMAGES_ACCOUNT_ID": "PENDING",
+    "IMAGES_DELIVERY_URL": "https://imagedelivery.net/PENDING"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "masjidsentral",
+      "database_id": "28e4a5dc-18d5-4d5c-a080-c629179764ad",
+      "migrations_dir": "../masjidsentral-db-schema/migrations"
+    }
+  ]
+}

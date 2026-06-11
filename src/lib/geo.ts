@@ -1,0 +1,31 @@
+// Geohash proximity helpers and Haversine distance calculation for proximity search.
+
+import ngeohash from 'ngeohash'
+
+/**
+ * Returns an array of 9 geohash prefix strings (center + 8 neighbors) for the given
+ * lat/lng and radius. Prefix length is tiered: 5 for <=5km, 4 for <=20km.
+ */
+export function geohashPrefixes(lat: number, lng: number, radiusKm: number): string[] {
+  // Encode at precision 7 (~153m cells), then truncate to coverage-appropriate prefix length.
+  // p5 cells (~4.9km) cover up to 5km radius; p4 (~39km cells) cover up to 20km.
+  const hash7 = ngeohash.encode(lat, lng, 7)
+  const prefixLen = radiusKm <= 5 ? 5 : 4
+  const centerPrefix = hash7.slice(0, prefixLen)
+  const neighborPrefixes = ngeohash.neighbors(centerPrefix)
+  return [centerPrefix, ...neighborPrefixes] // 9 cells total
+}
+
+/**
+ * Haversine distance between two lat/lng points, in kilometers.
+ */
+export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371 // Earth radius in km (use 6_371_000 for meters — see deduplicate.js)
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}

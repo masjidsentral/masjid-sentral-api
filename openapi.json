@@ -1,0 +1,705 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Masjid Sentral API",
+    "version": "1.0.0",
+    "description": "Open database of every masjid, surau, and musolla in Malaysia"
+  },
+  "servers": [
+    { "url": "https://api.masjidsentral.my", "description": "Production" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "StateRow": {
+        "type": "object",
+        "properties": {
+          "id":         { "type": "string", "example": "my-sgr" },
+          "name":       { "type": "string", "example": "Selangor" },
+          "country_id": { "type": "string", "example": "my" }
+        },
+        "required": ["id", "name", "country_id"]
+      },
+      "CityRow": {
+        "type": "object",
+        "properties": {
+          "id":       { "type": "string", "example": "my-sgr-sha" },
+          "name":     { "type": "string", "example": "Shah Alam" },
+          "state_id": { "type": "string", "example": "my-sgr" }
+        },
+        "required": ["id", "name", "state_id"]
+      },
+      "MasjidRow": {
+        "type": "object",
+        "description": "Full masjid record — public fields only (internal soft-delete column excluded)",
+        "properties": {
+          "id":               { "type": "integer", "example": 1 },
+          "name":             { "type": "string",  "example": "Masjid Sultan Salahuddin Abdul Aziz Shah" },
+          "type_id":          { "type": "string",  "example": "masjid" },
+          "lat":              { "type": "number",  "format": "double", "example": 3.0697 },
+          "lng":              { "type": "number",  "format": "double", "example": 101.5186 },
+          "geohash":          { "type": "string",  "example": "w21zd5x" },
+          "city_id":          { "type": ["string", "null"], "example": "my-sgr-sha" },
+          "state_id":         { "type": "string",  "example": "my-sgr" },
+          "country_id":       { "type": "string",  "example": "my" },
+          "address":          { "type": ["string", "null"], "example": "Persiaran Masjid, Shah Alam, Selangor" },
+          "description":      { "type": ["string", "null"], "example": "State mosque of Selangor" },
+          "status":           { "type": "string",  "enum": ["active", "deleted"], "example": "active" },
+          "jumaat_available": { "type": "integer", "enum": [0, 1], "example": 1 },
+          "telephone":        { "type": ["string", "null"], "example": "+60355191133" },
+          "email":            { "type": ["string", "null"], "example": null },
+          "google_url":       { "type": ["string", "null"], "example": "https://maps.google.com/?cid=12345" },
+          "source":           { "type": "string",  "example": "jejak_masjid" },
+          "created_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
+          "updated_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" }
+        },
+        "required": [
+          "id", "name", "type_id", "lat", "lng", "geohash",
+          "city_id", "state_id", "country_id", "address", "description",
+          "status", "jumaat_available", "telephone", "email", "google_url",
+          "source", "created_at", "updated_at"
+        ]
+      },
+      "MasjidListItem": {
+        "type": "object",
+        "description": "Masjid record as returned in list responses — excludes description, geohash, telephone, email, google_url; adds thumbnail_url",
+        "properties": {
+          "id":               { "type": "integer", "example": 1 },
+          "name":             { "type": "string",  "example": "Masjid Sultan Salahuddin Abdul Aziz Shah" },
+          "type_id":          { "type": "string",  "example": "masjid" },
+          "lat":              { "type": "number",  "format": "double", "example": 3.0697 },
+          "lng":              { "type": "number",  "format": "double", "example": 101.5186 },
+          "city_id":          { "type": ["string", "null"], "example": "my-sgr-sha" },
+          "state_id":         { "type": "string",  "example": "my-sgr" },
+          "country_id":       { "type": "string",  "example": "my" },
+          "address":          { "type": ["string", "null"], "example": "Persiaran Masjid, Shah Alam, Selangor" },
+          "status":           { "type": "string",  "enum": ["active", "deleted"], "example": "active" },
+          "jumaat_available": { "type": "integer", "enum": [0, 1], "example": 1 },
+          "source":           { "type": "string",  "example": "jejak_masjid" },
+          "created_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
+          "updated_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
+          "thumbnail_url":    { "type": ["string", "null"], "example": "https://imagedelivery.net/abc123/thumb/thumbnail" }
+        },
+        "required": [
+          "id", "name", "type_id", "lat", "lng",
+          "city_id", "state_id", "country_id", "address",
+          "status", "jumaat_available", "source", "created_at", "updated_at",
+          "thumbnail_url"
+        ]
+      },
+      "MasjidImageDetail": {
+        "type": "object",
+        "properties": {
+          "id":            { "type": "integer", "example": 1 },
+          "masjid_id":     { "type": "integer", "example": 1 },
+          "path":          { "type": "string",  "example": "abc123defg456" },
+          "is_thumbnail":  { "type": "integer", "enum": [0, 1], "example": 1 },
+          "sort_order":    { "type": "integer", "example": 0 },
+          "created_at":    { "type": "string",  "format": "date-time" },
+          "thumbnail_url": { "type": "string",  "example": "https://imagedelivery.net/abc123/abc123defg456/thumbnail" },
+          "full_url":      { "type": "string",  "example": "https://imagedelivery.net/abc123/abc123defg456/public" }
+        },
+        "required": ["id", "masjid_id", "path", "is_thumbnail", "sort_order", "created_at", "thumbnail_url", "full_url"]
+      },
+      "MasjidFacility": {
+        "type": "object",
+        "properties": {
+          "id":        { "type": "integer", "example": 1 },
+          "masjid_id": { "type": "integer", "example": 1 },
+          "facility":  { "type": "string",  "example": "wudu" }
+        },
+        "required": ["id", "masjid_id", "facility"]
+      },
+      "MasjidContact": {
+        "type": "object",
+        "properties": {
+          "masjid_id": { "type": "integer", "example": 1 },
+          "type":      { "type": "string", "enum": ["facebook", "instagram", "twitter", "youtube", "whatsapp"], "example": "facebook" },
+          "value":     { "type": "string", "example": "https://facebook.com/masjidshahalam" }
+        },
+        "required": ["masjid_id", "type", "value"]
+      },
+      "MasjidReview": {
+        "type": "object",
+        "properties": {
+          "id":         { "type": "integer", "example": 1 },
+          "masjid_id":  { "type": "integer", "example": 1 },
+          "rating":     { "type": "number",  "minimum": 1, "maximum": 5, "example": 4.5 },
+          "message":    { "type": ["string", "null"], "example": "Clean and spacious" },
+          "source_app": { "type": "string",  "example": "jejak_masjid" },
+          "created_at": { "type": "string",  "format": "date-time" }
+        },
+        "required": ["id", "masjid_id", "rating", "message", "source_app", "created_at"]
+      },
+      "MasjidEvent": {
+        "type": "object",
+        "properties": {
+          "id":          { "type": "integer", "example": 1 },
+          "masjid_id":   { "type": "integer", "example": 1 },
+          "title":       { "type": "string",  "example": "Kuliah Subuh" },
+          "description": { "type": ["string", "null"], "example": "Weekly Subuh lecture" },
+          "start_at":    { "type": "string",  "format": "date-time", "example": "2026-06-15T05:30:00.000Z" },
+          "end_at":      { "type": ["string", "null"], "format": "date-time" },
+          "status":      { "type": "string",  "enum": ["active", "cancelled", "completed"], "example": "active" },
+          "rrule":       { "type": ["string", "null"], "example": "FREQ=WEEKLY;BYDAY=SU" },
+          "source_app":  { "type": "string",  "example": "jejak_masjid" },
+          "created_at":  { "type": "string",  "format": "date-time" },
+          "updated_at":  { "type": "string",  "format": "date-time" }
+        },
+        "required": ["id", "masjid_id", "title", "description", "start_at", "end_at", "status", "rrule", "source_app", "created_at", "updated_at"]
+      },
+      "MasjidDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/MasjidRow" },
+          {
+            "type": "object",
+            "properties": {
+              "images":       { "type": "array", "items": { "$ref": "#/components/schemas/MasjidImageDetail" } },
+              "facilities":   { "type": "array", "items": { "$ref": "#/components/schemas/MasjidFacility" } },
+              "contacts":     { "type": "array", "items": { "$ref": "#/components/schemas/MasjidContact" } },
+              "reviews":      { "type": "array", "items": { "$ref": "#/components/schemas/MasjidReview" } },
+              "events":       { "type": "array", "items": { "$ref": "#/components/schemas/MasjidEvent" } },
+              "avg_rating":   { "type": ["number", "null"], "example": 4.5 },
+              "review_count": { "type": "integer", "example": 12 }
+            },
+            "required": ["images", "facilities", "contacts", "reviews", "events", "avg_rating", "review_count"]
+          }
+        ]
+      },
+      "MasjidListResponse": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/MasjidListItem" }
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "total":    { "type": "integer", "example": 11429 },
+              "page":     { "type": "integer", "example": 1 },
+              "per_page": { "type": "integer", "example": 20 }
+            },
+            "required": ["total", "page", "per_page"]
+          }
+        },
+        "required": ["data", "meta"]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string", "example": "Missing required param: state" }
+        },
+        "required": ["error"]
+      }
+    }
+  },
+  "paths": {
+    "/states": {
+      "get": {
+        "summary": "List states",
+        "description": "Returns all states. Optionally filter by country.",
+        "operationId": "listStates",
+        "tags": ["Reference"],
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "description": "Filter by country ID (e.g. `my`, `sg`, `bn`, `id`)",
+            "schema": { "type": "string", "example": "my" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of states",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/StateRow" }
+                    }
+                  },
+                  "required": ["data"]
+                },
+                "example": {
+                  "data": [
+                    { "id": "my-sgr", "name": "Selangor", "country_id": "my" },
+                    { "id": "my-kul", "name": "Kuala Lumpur", "country_id": "my" }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cities": {
+      "get": {
+        "summary": "List cities in a state",
+        "description": "Returns all cities within a given state. The `state` query parameter is required.",
+        "operationId": "listCities",
+        "tags": ["Reference"],
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "description": "State ID (e.g. `my-sgr`)",
+            "schema": { "type": "string", "example": "my-sgr" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of cities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/CityRow" }
+                    }
+                  },
+                  "required": ["data"]
+                },
+                "example": {
+                  "data": [
+                    { "id": "my-sgr-sha", "name": "Shah Alam", "state_id": "my-sgr" },
+                    { "id": "my-sgr-kls", "name": "Klang", "state_id": "my-sgr" }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required param: state",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Missing required param: state" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/masjids": {
+      "get": {
+        "summary": "List masjids",
+        "description": "Returns a paginated list of masjids. Supports filtering by state, city, type, name search, and Jumaat availability. D-05: Selangor example — `state=my-sgr`.",
+        "operationId": "listMasjids",
+        "tags": ["Masjids"],
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "Filter by state ID (e.g. `my-sgr`)",
+            "schema": { "type": "string", "example": "my-sgr" }
+          },
+          {
+            "name": "city",
+            "in": "query",
+            "required": false,
+            "description": "Filter by city ID (e.g. `my-sgr-sha`)",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Filter by masjid type",
+            "schema": { "type": "string", "enum": ["masjid", "surau", "mini-surau"] }
+          },
+          {
+            "name": "jumaat",
+            "in": "query",
+            "required": false,
+            "description": "Filter to only masjids that hold Friday prayers (`1` = yes)",
+            "schema": { "type": "string", "enum": ["1"] }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Name search (case-insensitive LIKE; max 48 characters)",
+            "schema": { "type": "string", "maxLength": 48 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "Page number (default 1; always 20 results per page)",
+            "schema": { "type": "integer", "minimum": 1, "default": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of masjids",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MasjidListResponse" },
+                "example": {
+                  "data": [
+                    {
+                      "id": 1,
+                      "name": "Masjid Sultan Salahuddin Abdul Aziz Shah",
+                      "type_id": "masjid",
+                      "lat": 3.0697,
+                      "lng": 101.5186,
+                      "city_id": "my-sgr-sha",
+                      "state_id": "my-sgr",
+                      "country_id": "my",
+                      "address": "Persiaran Masjid, Shah Alam, Selangor",
+                      "status": "active",
+                      "jumaat_available": 1,
+                      "source": "jejak_masjid",
+                      "created_at": "2024-01-01T00:00:00.000Z",
+                      "updated_at": "2024-01-01T00:00:00.000Z",
+                      "thumbnail_url": null
+                    }
+                  ],
+                  "meta": { "total": 3500, "page": 1, "per_page": 20 }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a new masjid",
+        "description": "Creates a new masjid record. Requires a valid API key (Bearer token).",
+        "operationId": "createMasjid",
+        "tags": ["Masjids"],
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name":              { "type": "string",  "description": "Full name of the masjid" },
+                  "type_id":           { "type": "string",  "enum": ["masjid", "surau", "mini-surau"] },
+                  "state_id":          { "type": "string",  "description": "State ID (e.g. `my-sgr`)" },
+                  "country_id":        { "type": "string",  "description": "Country ID (e.g. `my`)" },
+                  "lat":               { "type": "number",  "format": "double", "description": "Latitude" },
+                  "lng":               { "type": "number",  "format": "double", "description": "Longitude" },
+                  "address":           { "type": "string",  "description": "Street address" },
+                  "source":            { "type": "string",  "description": "Data source identifier", "enum": ["jejak_masjid", "qiyam", "osm", "manual"] },
+                  "city_id":           { "type": "string",  "description": "City ID (optional)" },
+                  "description":       { "type": "string",  "description": "Description of the masjid" },
+                  "telephone":         { "type": "string" },
+                  "email":             { "type": "string",  "format": "email" },
+                  "google_url":        { "type": "string",  "format": "uri" },
+                  "jumaat_available":  { "type": ["integer", "boolean"], "description": "1/true if Friday prayers held" }
+                },
+                "required": ["name", "type_id", "state_id", "country_id", "lat", "lng", "address", "source"]
+              },
+              "example": {
+                "name": "Masjid Al-Falah",
+                "type_id": "masjid",
+                "state_id": "my-sgr",
+                "country_id": "my",
+                "lat": 3.1,
+                "lng": 101.6,
+                "address": "Jalan Masjid, Shah Alam, Selangor",
+                "source": "manual",
+                "jumaat_available": 1
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Masjid created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MasjidRow" }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid field",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Missing required field: name" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — invalid or missing API key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/masjids/nearby": {
+      "get": {
+        "summary": "Nearby masjid search",
+        "description": "Returns masjids within a given radius of the provided coordinates. Uses geohash prefix matching + Haversine distance filter.",
+        "operationId": "nearbyMasjids",
+        "tags": ["Masjids"],
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "description": "Latitude (-90 to 90)",
+            "schema": { "type": "number", "format": "double", "minimum": -90, "maximum": 90 }
+          },
+          {
+            "name": "lng",
+            "in": "query",
+            "required": true,
+            "description": "Longitude (-180 to 180)",
+            "schema": { "type": "number", "format": "double", "minimum": -180, "maximum": 180 }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "required": false,
+            "description": "Search radius in kilometres (default 5, max 20)",
+            "schema": { "type": "number", "format": "double", "minimum": 0.001, "maximum": 20, "default": 5 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Masjids within the requested radius",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/MasjidListItem" }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "total":    { "type": "integer" },
+                        "page":     { "type": "integer" },
+                        "per_page": { "type": "integer" }
+                      },
+                      "required": ["total", "page", "per_page"]
+                    }
+                  },
+                  "required": ["data", "meta"]
+                },
+                "example": {
+                  "data": [],
+                  "meta": { "total": 0, "page": 1, "per_page": 20 }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or missing parameters",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "examples": {
+                  "missing_lat_lng": {
+                    "summary": "Missing lat/lng",
+                    "value": { "error": "Missing required param: lat, lng" }
+                  },
+                  "invalid_range": {
+                    "summary": "Out-of-range coordinates",
+                    "value": { "error": "Invalid lat/lng range" }
+                  },
+                  "radius_too_large": {
+                    "summary": "Radius exceeds maximum",
+                    "value": { "error": "Radius exceeds maximum of 20km" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/masjids/{id}": {
+      "get": {
+        "summary": "Get masjid detail",
+        "description": "Returns the full detail record for a single masjid including images, facilities, contacts, reviews, and upcoming events.",
+        "operationId": "getMasjid",
+        "tags": ["Masjids"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Masjid integer ID",
+            "schema": { "type": "integer", "example": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full masjid detail",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MasjidDetail" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ID format",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Invalid id" }
+              }
+            }
+          },
+          "404": {
+            "description": "Masjid not found or deleted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Masjid not found" }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update a masjid",
+        "description": "Partially updates an existing masjid. Requires a valid API key. `lat` and `lng` must both be provided together when updating coordinates — the geohash is recomputed server-side.",
+        "operationId": "updateMasjid",
+        "tags": ["Masjids"],
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Masjid integer ID",
+            "schema": { "type": "integer", "example": 1 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Any subset of patchable fields. `lat` and `lng` must both be present or both absent.",
+                "properties": {
+                  "name":             { "type": "string" },
+                  "type_id":          { "type": "string", "enum": ["masjid", "surau", "mini-surau"] },
+                  "state_id":         { "type": "string" },
+                  "country_id":       { "type": "string" },
+                  "city_id":          { "type": "string" },
+                  "lat":              { "type": "number", "format": "double" },
+                  "lng":              { "type": "number", "format": "double" },
+                  "address":          { "type": "string" },
+                  "description":      { "type": "string" },
+                  "telephone":        { "type": "string" },
+                  "email":            { "type": "string", "format": "email" },
+                  "google_url":       { "type": "string", "format": "uri" },
+                  "jumaat_available": { "type": ["integer", "boolean"] },
+                  "source":           { "type": "string" }
+                },
+                "minProperties": 1
+              },
+              "example": {
+                "name": "Masjid Sultan Salahuddin Abdul Aziz Shah (Biru)",
+                "jumaat_available": 1
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated masjid record",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MasjidRow" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "examples": {
+                  "invalid_id": {
+                    "summary": "Non-numeric ID",
+                    "value": { "error": "Invalid id" }
+                  },
+                  "lat_lng_paired": {
+                    "summary": "lat without lng (or vice versa)",
+                    "value": { "error": "lat and lng must both be provided together" }
+                  },
+                  "no_fields": {
+                    "summary": "Empty body",
+                    "value": { "error": "No patchable fields provided" }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — invalid or missing API key",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Unauthorized" }
+              }
+            }
+          },
+          "404": {
+            "description": "Masjid not found or deleted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
+                "example": { "error": "Masjid not found" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Returns this OpenAPI 3.1.0 specification as JSON. Used by Scalar and other tooling to render the API reference.",
+        "operationId": "getOpenApiSpec",
+        "tags": ["Meta"],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1.0 specification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "openapi": { "type": "string", "example": "3.1.0" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
