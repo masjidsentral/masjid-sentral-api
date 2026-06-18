@@ -6,7 +6,7 @@
     "description": "Open database of every masjid, surau, and musolla in Malaysia"
   },
   "servers": [
-    { "url": "https://api.masjidsentral.my", "description": "Production" }
+    { "url": "https://api.masjidsentral.workers.dev", "description": "Production" }
   ],
   "components": {
     "securitySchemes": {
