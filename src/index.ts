@@ -66,11 +66,11 @@ app.notFound((c) => {
 
 export { app }
 
-/** The daily duplicate scan (03:00 MYT). The per-minute trigger does everything else. */
-export const SCAN_CRON = '0 19 * * *'
+/** The hourly duplicate scan. The per-minute trigger does everything else. */
+export const SCAN_CRON = '0 * * * *'
 
 // Default export carries both handlers: HTTP and the cron triggers. `* * * * *`: webhook dispatch and the
-// idempotency sweep. `0 19 * * *`: the duplicate scan.
+// idempotency sweep. `0 * * * *`: the duplicate scan (SCAN_MAX_MASJIDS per run).
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: CloudflareBindings, ctx: ExecutionContext) {

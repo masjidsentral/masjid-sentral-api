@@ -14,7 +14,7 @@ interface Dup {
 }
 const admin = KEYS.admin.token
 
-const resetCursor = () => env.DB.prepare("UPDATE scan_state SET last_updated_at = '', last_id = 0, last_run_at = NULL WHERE id = 1").run()
+const resetCursor = () => env.DB.prepare("UPDATE scan_state SET last_updated_at = '', last_id = 0, last_run_at = NULL, last_error = NULL WHERE id = 1").run()
 async function pair(a: number, b: number) {
   const [x, y] = [Math.min(a, b), Math.max(a, b)]
   return env.DB.prepare('SELECT * FROM duplicate_candidates WHERE masjid_a = ? AND masjid_b = ?').bind(x, y).all<Record<string, any>>()
@@ -104,7 +104,7 @@ describe('duplicate scan', () => {
     expect(state!.last_run_at).toBeTruthy()
   })
 
-  it('the daily cron trigger runs the scan; the per-minute trigger does not', async () => {
+  it('the hourly cron trigger runs the scan; the per-minute trigger does not', async () => {
     const a = await mk(61, 'Masjid Cron Check')
     const b = await mk(61, 'Masjid Cron Check', 40)
     const run = async (cron: string | undefined) => {
@@ -114,7 +114,7 @@ describe('duplicate scan', () => {
     }
     await run('* * * * *')
     expect((await pair(a.id, b.id)).results).toHaveLength(0)
-    await run('0 19 * * *')
+    await run('0 * * * *')
     expect((await pair(a.id, b.id)).results).toHaveLength(1)
   })
 })
@@ -229,7 +229,7 @@ describe('GET /admin/duplicates and the queue actions', () => {
 })
 
 describe('scan cost', () => {
-  it('a full 1,000-masjid run stays inside the free-plan limits (D1 round trips, rows read)', async () => {
+  it('a full-size run (150 masjids) stays inside the free-plan limits (D1 round trips, rows read)', async () => {
     const base = { lat: 3.0, lng: 101.0 }
     const rows: Array<[string, number, number]> = []
     // ~1,000 masjids on a 32 x 32 grid, 700 m apart (a dense urban spread), plus 20 deliberate twins.
@@ -258,15 +258,82 @@ describe('scan cost', () => {
     console.log('SCAN COST', JSON.stringify({ ...stats, ms, masjids_in_db: rows.length }))
 
     expect(stats.scanned).toBe(SCAN_MAX_MASJIDS)
-    expect(stats.caught_up).toBe(false) // 20 twins beyond the cap: the next run continues
-    expect(stats.pairs_found).toBeGreaterThanOrEqual(10)
-    // Free plan: 50 subrequests per invocation. State + select + 10 search batches + insert batch + cursor.
-    expect(stats.d1_calls).toBeLessThanOrEqual(20)
+    expect(stats.caught_up).toBe(false) // 1,020 masjids: the next runs continue
+    expect(stats.completed).toBe(SCAN_MAX_MASJIDS)
+    expect(stats.pairs_found).toBeGreaterThanOrEqual(3) // the first four grid masjids have a twin
+    // Free plan: 50 subrequests per invocation. State + select + 2 x (search + write batch) + final state update.
+    expect(stats.d1_calls).toBeLessThanOrEqual(8)
     // Each search reads a handful of index entries, not the table.
     expect(stats.rows_read / stats.scanned).toBeLessThan(60)
 
-    const next = await runDuplicateScan(env.DB)
-    expect(next.caught_up).toBe(true)
-    expect(next.scanned).toBeGreaterThan(0)
+    let runs = 1
+    let caught = false
+    while (!caught && runs < 20) {
+      caught = (await runDuplicateScan(env.DB)).caught_up
+      runs++
+    }
+    expect(caught).toBe(true)
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM duplicate_candidates').first<{ n: number }>())!.n).toBeGreaterThanOrEqual(10)
+  })
+})
+
+describe('scan resilience and status (H2)', () => {
+  async function bulk(n: number, prefix: string) {
+    const lat0 = 4.5
+    const now = '2026-11-14T00:00:00Z'
+    const stmts = Array.from({ length: n }, (_, i) => {
+      const lat = lat0 + Math.floor(i / 20) * 0.01
+      const lng = 102.0 + (i % 20) * 0.01
+      return env.DB
+        .prepare(
+          `INSERT INTO masjids (name, type_id, lat, lng, geohash, state_id, country_id, updated_at, created_at)
+           VALUES (?, 'masjid', ?, ?, ?, 'my-kul', 'my', ?, ?)`,
+        )
+        .bind(`${prefix} ${i}`, lat, lng, ngeohash.encode(lat, lng, 9), now, now)
+    })
+    for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50))
+  }
+
+  it('a run that throws mid-way keeps the cursor of the completed batches and records the error', async () => {
+    await bulk(130, 'Masjid Resume')
+    await resetCursor()
+    const ids = (await env.DB.prepare("SELECT id FROM masjids WHERE status = 'active' ORDER BY updated_at, id LIMIT 130").all<{ id: number }>()).results
+    // search batch 1, write batch 1, then the second search batch fails
+    let batches = 0
+    const flaky = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === 'batch') {
+          return async (stmts: D1PreparedStatement[]) => {
+            if (++batches === 3) throw new Error('D1 exploded')
+            return target.batch(stmts)
+          }
+        }
+        const v = Reflect.get(target, prop, target)
+        return typeof v === 'function' ? v.bind(target) : v
+      },
+    })
+    await expect(runDuplicateScan(flaky, { maxMasjids: 130 })).rejects.toThrow('D1 exploded')
+    const state = await env.DB.prepare('SELECT * FROM scan_state WHERE id = 1').first<Record<string, any>>()
+    expect(state!.last_id).toBe(ids[99].id)
+    expect(state!.last_run_scanned).toBe(100)
+    expect(state!.last_error).toContain('D1 exploded')
+
+    const rest = await runDuplicateScan(env.DB, { maxMasjids: 130 })
+    expect(rest.scanned).toBeGreaterThanOrEqual(1)
+    expect((await env.DB.prepare('SELECT last_error FROM scan_state WHERE id = 1').first<{ last_error: string | null }>())!.last_error).toBeNull()
+  })
+
+  it('GET /admin/scan reports the cursor, the last run and the masjids remaining (admin only)', async () => {
+    await resetCursor()
+    const total = (await env.DB.prepare("SELECT COUNT(*) AS n FROM masjids WHERE status = 'active'").first<{ n: number }>())!.n
+    const before = await (await get('/admin/scan')).json() as Record<string, any>
+    expect(before).toMatchObject({ last_run_at: null, last_error: null, masjids_remaining: total, max_masjids_per_run: SCAN_MAX_MASJIDS })
+    await runDuplicateScan(env.DB, { maxMasjids: 10 })
+    const after = await (await get('/admin/scan')).json() as Record<string, any>
+    expect(after.last_run_scanned).toBe(10)
+    expect(after.masjids_remaining).toBe(total - 10)
+    expect(after.last_run_at).toBeTruthy()
+    expect(after.cursor.id).toBeGreaterThan(0)
+    for (const token of [KEYS.jm.token, KEYS.read.token]) expect((await get('/admin/scan', token)).status).toBe(403)
   })
 })
