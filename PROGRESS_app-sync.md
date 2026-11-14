@@ -162,3 +162,58 @@ New match scores (distance in brackets, score = 0.7 sim + 0.3 dist):
 | MASJID JAMEK SULTAN ABDUL SAMAD / Masjid Jamek Kuala Lumpur (40 m) | 0.829 | 0.857 (review band) |
 | MASJID AL-HIDAYAH / Masjid Al Hidayah (20 m) | 1.000 | 0.988 |
 | Surau Al-Ikhlas / Surau An-Nur (30 m) | 0.442 | 0.591 |
+
+## S4 — Admin, scan, openapi v1.1, README (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+Commits
+- `masjidsentral-db-schema`: 1e6d309 `feat(sync): 005 duplicate_candidates and scan_state` (additive; 001-004 untouched).
+- `api`: f8d19b7 (source: merge, revert, scan, queue, cron), e79b8c3 (tests), 3c0e1e3 (openapi v1.1, README, route-coverage test), plus this note.
+- Tests: 343 passing (`npx vitest run`), `npx tsc --noEmit` clean. New: `tests/s4-admin.test.ts` (17), `tests/s4-scan.test.ts` (11), 7 added to `tests/openapi.test.ts`.
+
+Built
+- `src/lib/admin.ts`: `buildMergeSpecs`, `buildRevertSpecs`, `adminCtx`. `src/lib/scan.ts`: `runDuplicateScan`. `src/routes/admin.ts`: `POST /admin/masjids/:id/merge`, `POST /admin/changes/:seq/revert`, `GET /admin/duplicates`, `POST /admin/duplicates/:id/dismiss`, `POST /admin/duplicates/:id/merge`.
+- `match.ts`: `candidateStatement` / `scoreRows` split out of `findCandidates` (same behaviour); `specs.ts`: `loadLiveEvents` and `masjidDeleteSpecs` (DELETE /masjids/:id now uses it; revert-of-create reuses it).
+- Cron `0 19 * * *` added next to `* * * * *`; `scheduled` dispatches on `controller.cron` (scan on the daily one, webhook dispatch + idempotency sweep otherwise).
+- `openapi.json` v1.1.0 (25 paths, 32 operations, generated once then committed as plain JSON), bearer auth on all but `/` and `/openapi.json`, Error schema with all 11 codes. `tests/openapi.test.ts` fails if a registered route is undocumented (or a documented one is not registered), checks security, operationIds, path params, `$ref`s, error codes, and that the Masjid schema lists exactly the fields the server returns.
+- `README.md` rewritten (v1.1 summary, keys, no CORS, contract location, dev/test commands, crons, owner deploy order; says not deployed).
+
+Merge semantics (`POST /admin/masjids/:id/merge { into, reason? }`; the path masjid is removed)
+- One `runCommitMany` batch, survivor first: (1) survivor `update` (`changed_fields: ["external_ids"]`, version +1); (2) loser `merge` (`status: merged`, `merged_into`, its `masjid_external_ids` rows re-pointed to the survivor, version +1) = the idempotent response; (3) one `event` `update` per non-deleted programme (`masjid_id` -> survivor, version +1, change `masjid_id` = survivor). Deleted programmes stay on the loser.
+- Pre-guards (inside the batch): both masjids active and different; no programme appeared on the loser since it was listed. A lost guard re-reads: not active -> 422 `not_active` (`details.masjid_id`, `status`), otherwise 409 `version_conflict`. Stale versions of survivor/loser/events lose the version guard -> 409 (nothing persists; tested).
+- `into == id` 422 (`same_masjid`); missing masjid 404; > 200 live programmes 422 `too_many_events`. `Idempotency-Key` is optional on admin writes (auto key if absent), replays honoured when sent.
+- The loser's `merge` change `after_json` = merged entity (`external_ids: []`) plus `merged_into`, `moved_external_ids`, optional `reason`. The survivor and event changes carry `via_merge: <loser id>` (change log only; a client sees it in `/changes` `data`, R10 makes it harmless). `by-external` of any moved id returns the survivor directly (200); `GET /masjids/<loser>` is 301.
+- Queue rows resolved in the same batch: the pair's pending row -> `merged`; every other pending row involving the loser -> `dismissed` (chosen over re-pointing: the survivor's version bump moves its `updated_at`, so the next scan looks at it again and re-queues any real remaining duplicate). Applies to the plain merge too.
+
+Revert semantics (`POST /admin/changes/:seq/revert`, no body, no If-Match)
+- Applies `before_json` as a new write, version = current + 1, `actor: "revert:<seq>"`, `origin_app: "sentral_admin"`. Full restore: all scalar columns (geohash included), contacts / facilities / images replaced when they differ, external-id rows deleted when `before_json` lacks them and re-added when it has them (checked first: an id now held by another entity -> 409 `already_linked`, nothing changes). `changed_fields` = fields that actually differ. Programmes: all columns plus link rows.
+- Revert of a **create** = soft delete (op `delete`, with the programme cascade for a masjid, 200-programme cap applies). Revert of a **delete** = update back to `before_json` (status active), only if the entity is currently deleted (else 422 `not_deleted`); cascade-deleted programmes stay deleted (revert each). Revert of an update on a deleted entity: 422 `entity_deleted` (revert the delete first). Already-deleted create revert: 422 `already_deleted`.
+- Refused 422: `merge` changes and every change carrying `via_merge` (`merge_not_revertable`), merged masjids (`entity_merged`, `details.merged_into`), a programme whose masjid is not active (`masjid_not_active`, checked in-batch), damaged `before_json` (`bad_before_json`). Unknown seq 404. A write between read and commit loses the version guard -> 409.
+- A revert of a revert works (re-adds what the first removed).
+
+Duplicate scan (`src/lib/scan.ts`)
+- Cursor `(updated_at, id)` in `scan_state` (migration 005; one row). Each run: active masjids past the cursor, oldest first, `LIMIT 1000` (index `idx_masjids_updated_at`); one bounded 150 m search (`candidateStatement`: lat/lng box + <= 16 geohash cells, `INDEXED BY idx_masjids_geohash`) per masjid, 100 searches per `db.batch`; `scoreRows`; pairs with score >= 0.8 and distance <= 150 m inserted `INSERT OR IGNORE` as `pending` (`masjid_a < masjid_b`, `UNIQUE`). Non-active masjids are excluded by the search (so skipped on both sides). A dismissed or merged pair is never re-queued (its row stays).
+- Not caught up (1,000 reached): cursor = last masjid scanned, the next run continues. Caught up: cursor parks at now minus 5 minutes (never backwards) so a masjid written in the cursor's second, or during the run, is rescanned next time; the overlap is harmless (INSERT OR IGNORE).
+- **Cost, measured (local D1, 1,020 active masjids, 1,000 scanned, 20 twin pairs)**: 14 D1 round trips (state, select, 10 search batches, 1 insert batch, cursor), 10,878 rows read (about 11 per masjid), 20 pairs found and inserted, 116 ms wall time including the local D1 simulation. Free plan: 14 of 50 subrequests; roughly 11k rows/day against the 5M/day read allowance. CPU is not separately measurable here (10 ms free-plan CPU is a real risk for 1,000 Jaro-Winkler scorings plus JSON decode; if the first prod run is CPU-limited the cursor does not advance, so lower `SCAN_MAX_MASJIDS` in `src/lib/scan.ts` and redeploy). The cron handler catches and logs scan errors, so it never blocks webhook dispatch (separate trigger).
+- Queue: `GET /admin/duplicates?status=pending|merged|dismissed|all&limit&cursor` -> `{ data, next_cursor }`, keyset on id ascending, each row `{ id, status, score, distance_m, same_type, masjid_a, masjid_b (id, name, type_id, lat, lng, address, status, external_ids), created_at, resolved_at }`. `dismiss`: pending -> dismissed; twice = 200; a merged row 422 `not_pending`. `POST /admin/duplicates/:id/merge { into }`: `into` must be `masjid_a` or `masjid_b` (else 422), pending only, then the same merge write; response = the removed masjid.
+
+Interpretations / things for the orchestrator
+1. **Contract edits needed (I did not touch the contract):** (a) section 6.4: say the survivor may hold two ids from one app and `by-external` for either returns the survivor; the merge `data` also has `moved_external_ids` (and `reason` when given); `data.external_ids` of the removed masjid is empty. (b) section 8: a revert of a create arrives as op `delete`, of a delete as `update`; merges cannot be reverted in v1.1. (c) Optional: `/changes` `data` of merge-made changes carries an extra `via_merge` key (covered by R10).
+2. Admin writes record `origin_app: "sentral_admin"`; the admin key's own `app_id` is ignored. Revert replaces the actor header with `revert:<seq>`, so the admin's own actor id is not recorded there (the seq identifies the reverted change).
+3. Merge/revert accept `Idempotency-Key` but do not require it (admin tool ergonomics). Dismiss is a plain row update (no pipeline, no change log: the queue is not part of the feed).
+4. Programme `masjid_id` changes in a merge are `update` changes with `changed_fields: ["masjid_id"]`.
+5. `scan_state` holds the cursor as (`last_updated_at`, `last_id`) plus `last_run_at` (extra column vs the spec's "one-row table").
+6. No endpoint triggers a scan on demand; the daily cron only. To test locally call `runDuplicateScan(env.DB)`.
+7. The `ms_live_` admin test key has `app_id: sentral_admin`; a production admin key may have a null `app_id`; both work (`beginWrite` falls back to `sentral_admin`).
+
+### Consolidated owner deploy checklist (S1-S4)
+
+1. Ship S1-S4 together, never S1 alone (reads need keys from S1; 004 empties masjid data).
+2. Check remote `d1_migrations`: `001` and `002` recorded and `api_keys` present (record them by hand first if they were applied outside wrangler).
+3. D1 Time Travel bookmark of `masjidsentral` (004 is destructive).
+4. Apply migrations `003`, `004`, `005` remotely **before** deploying (new auth reads 003's columns; the daily cron reads 005's tables).
+5. Issue keys with `scripts/issue-key.mjs <app_id> <scopes>` and insert them **before** the deploy: `qiyam` (read,write), `jejak_masjid` (read,write), an admin key (admin), and a `webhook`-scoped key per receiving app (it needs an `app_id`; may be the app's own key with `read,write,webhook`).
+6. Rate-limit namespace: set a valid unique `namespace_id` for `RATE_LIMITER` in `wrangler.jsonc` ("1001" is a placeholder), 600 per 60 s.
+7. Deploy the Worker; it registers two crons: `* * * * *` (webhook dispatch, idempotency sweep) and `0 19 * * *` (duplicate scan, 03:00 MYT). Check both appear in the dashboard.
+8. Register webhooks with the admin key: `POST /admin/webhooks { api_key_id, url }` for Qiyam and JM (https only; secret shown once; duplicate registration is 409 `already_exists`).
+9. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch the first `0 19 * * *` run in the logs (`duplicate scan {...}` JSON line); if it is CPU-limited, lower `SCAN_MAX_MASJIDS`.
+10. `web/` dev portal still documents keyless reads (owner, out of scope).
