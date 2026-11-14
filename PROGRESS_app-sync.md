@@ -221,6 +221,7 @@ Interpretations / things for the orchestrator
 12. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch `GET /admin/scan` (cursor, `masjids_remaining`, `last_error`) and the first `duplicate scan {...}` log lines.
 13. **Rollback = D1 Time Travel restore to the step-5 bookmark AND a Worker rollback, never the Worker alone** (the old Worker cannot run on the 004 schema, and the new one cannot run on the old schema). Writes made after the migration are lost by the restore; tell Qiyam and JM first.
 14. `web/` dev portal still documents keyless reads (owner, out of scope).
+15. After deploy, check `GET /admin/scan` each hour for the first day: `last_run_at` moves and `stalled` is false (also glance at `consecutive_failures` and `skipped_ids`).
 
 ## S4 review fixes (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
 
@@ -237,3 +238,11 @@ Client-visible changes (for the contract)
 - **Reference data (M2):** 005 inserts `mini-surau` into `masjid_types` (INSERT OR IGNORE, same values as 001) and deletes `musolla` (guarded by NOT EXISTS on masjids). Deploy checklist step 4 diffs the reference tables first.
 - **openapi.json (L2):** 422 added to `/masjids`, `/masjids/nearby`, `/masjids/match`, `/events`, `/masjids/{id}/events`, `/changes`, `/cities`, `/admin/duplicates`; `stale_revert` in the Error enum; `ChangeDataExtras` (`via_merge`, `moved_external_ids`, `merged_into`, `forced`, all optional) on `Change.data`; `GET /admin/scan`; `force` query param; Idempotency-Key required on the four admin writes. No 410. `tests/openapi.test.ts` extended (422 on reads, scan route, extras, required idem key).
 - Deploy checklist rewritten (back-to-back steps, rollback = Time Travel + Worker rollback, plan/CPU check, namespace_id, reference-table diff).
+
+## S4 scan stall visibility and poisoned-batch skip (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+- `scan_state` (005, amended in place, not applied anywhere) gains `consecutive_failures` and `skipped_ids` (JSON, newest 100).
+- A run writes `last_run_at = <start>`, `last_error = 'running'` and `consecutive_failures + 1` before any work; a clean finish clears the error and the counter; a thrown error stores the message. `GET /admin/scan` adds `stalled` (`running` and start older than 15 min), `consecutive_failures`, `skipped_ids`. A CPU-killed run never reaches the catch, so it stays `running` and shows as stalled.
+- `SCAN_BATCH` is 25 (150 per run = 6 batches, 16 D1 calls). Counter resets whenever the cursor advances. At 3 unfinished runs on one cursor the next run scans one masjid at a time (max 20 per run, 2 calls each); a masjid that still throws is skipped (cursor moves past it, id appended to `skipped_ids`).
+- Limitation: a masjid that kills the Worker outright (CPU) even when scanned alone is not caught by single mode (no catch runs); it shows as `stalled` and needs the owner (lower `SCAN_MAX_MASJIDS` / inspect). Skipped ids are not re-scanned automatically; fix the row (its `updated_at` moves) and it is picked up on the next pass.
+- `openapi.json` ScanStatus updated. Tests: 359 passing (4 new in `tests/s4-scan.test.ts`; the batch-failure test and the cost test bounds adjusted to batch 25), `tsc --noEmit` clean.

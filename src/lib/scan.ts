@@ -8,8 +8,17 @@ export const SCAN_MIN_SCORE = 0.8
 export const SCAN_MAX_DISTANCE_M = 150
 /** Masjids scanned per run (hourly cron); the cursor continues on the next run. Small enough for the free plan's per-invocation budget. */
 export const SCAN_MAX_MASJIDS = 150
+/** Runs that did not finish on the same cursor before the next run goes one masjid at a time. */
+export const SCAN_FAILURES_BEFORE_SINGLE = 3
+/** Masjids per run in one-at-a-time mode (2 D1 calls each; keeps the run inside 50 subrequests). */
+export const SCAN_SINGLE_MAX = 20
+/** Newest skipped masjid ids kept in `scan_state.skipped_ids`. */
+export const SCAN_SKIPPED_CAP = 100
+/** `GET /admin/scan` reports `stalled` when a run has been 'running' longer than this. */
+export const SCAN_STALL_MS = 15 * 60 * 1000
+const RUNNING = 'running'
 /** Statements per D1 batch (one subrequest each; the free plan allows 50 per invocation). */
-const SCAN_BATCH = 100
+export const SCAN_BATCH = 25
 /**
  * When a run catches up, the cursor is parked this far behind "now" so a masjid written in the same second as
  * the cursor (or while the scan was running) is looked at again next time. Pairs are inserted with INSERT OR IGNORE,
@@ -34,10 +43,21 @@ export interface ScanStats {
   caught_up: boolean
   /** Masjids whose batch finished and whose cursor was persisted (== scanned unless a batch failed). */
   completed: number
+  /** Masjids skipped as poisoned this run (one-at-a-time mode only). */
+  skipped: number
 }
 
 interface ScanRow extends CandidateRow {
   updated_at: string
+}
+
+function parseIds(json: string | null): number[] {
+  try {
+    const v = JSON.parse(json ?? '[]')
+    return Array.isArray(v) ? v.filter((x): x is number => Number.isInteger(x)) : []
+  } catch {
+    return []
+  }
 }
 
 function isoSeconds(ms: number): string {
@@ -50,37 +70,48 @@ export async function runDuplicateScan(
 ): Promise<ScanStats> {
   const now = opts.now ?? new Date()
   const limit = opts.maxMasjids ?? SCAN_MAX_MASJIDS
-  const stats: ScanStats = { scanned: 0, candidates_seen: 0, pairs_found: 0, inserted: 0, d1_calls: 0, rows_read: 0, caught_up: true, completed: 0 }
+  const stats: ScanStats = { scanned: 0, candidates_seen: 0, pairs_found: 0, inserted: 0, d1_calls: 0, rows_read: 0, caught_up: true, completed: 0, skipped: 0 }
   const track = (meta: { rows_read?: number } | undefined) => { stats.rows_read += meta?.rows_read ?? 0 }
   const runAt = isoSeconds(now.getTime())
 
   const state = await db
-    .prepare('SELECT last_updated_at, last_id FROM scan_state WHERE id = 1')
-    .first<{ last_updated_at: string; last_id: number }>()
+    .prepare('SELECT last_updated_at, last_id, consecutive_failures, skipped_ids FROM scan_state WHERE id = 1')
+    .first<{ last_updated_at: string; last_id: number; consecutive_failures: number; skipped_ids: string }>()
   stats.d1_calls++
   if (!state) throw new Error('scan_state row missing (migration 005 not applied?)')
+  const single = state.consecutive_failures >= SCAN_FAILURES_BEFORE_SINGLE
+  const skipped = parseIds(state.skipped_ids)
+
+  // Mark the run as started BEFORE any work: a run killed by the Workers CPU limit never reaches the catch, so this
+  // stays behind as `running` with the start time (GET /admin/scan shows it as stalled). The counter counts runs
+  // started on this cursor; it resets when the cursor advances.
+  await db
+    .prepare('UPDATE scan_state SET last_run_at = ?, last_error = ?, consecutive_failures = consecutive_failures + 1 WHERE id = 1')
+    .bind(runAt, RUNNING)
+    .run()
+  stats.d1_calls++
 
   try {
+    const fetchLimit = single ? Math.min(limit, SCAN_SINGLE_MAX) : limit
     const rows = await db
       .prepare(
         `SELECT id, name, type_id, lat, lng, address, updated_at FROM masjids INDEXED BY idx_masjids_updated_at
          WHERE status = 'active' AND (updated_at > ? OR (updated_at = ? AND id > ?))
          ORDER BY updated_at, id LIMIT ?`,
       )
-      .bind(state.last_updated_at, state.last_updated_at, state.last_id, limit)
+      .bind(state.last_updated_at, state.last_updated_at, state.last_id, fetchLimit)
       .all<ScanRow>()
     stats.d1_calls++
     track(rows.meta)
     const masjids = rows.results
     stats.scanned = masjids.length
-    stats.caught_up = masjids.length < limit
+    stats.caught_up = masjids.length < fetchLimit
 
     let cursorAt = state.last_updated_at
     let cursorId = state.last_id
     // One search batch, then ONE write batch that queues its pairs and advances the cursor past it (atomic): a failure
     // later in the run keeps everything the finished batches did, and the next run resumes after them.
-    for (let i = 0; i < masjids.length; i += SCAN_BATCH) {
-      const chunk = masjids.slice(i, i + SCAN_BATCH)
+    async function scanChunk(chunk: ScanRow[]) {
       const results = await db.batch(chunk.map(m => candidateStatement(db, m.lat, m.lng, SCAN_MAX_DISTANCE_M)))
       stats.d1_calls++
       const pairs = new Map<string, { a: number; b: number; score: number; distance: number }>()
@@ -98,7 +129,6 @@ export async function runDuplicateScan(
           if (!prev || s.score > prev.score) pairs.set(key, { a, b, score: s.score, distance: Math.round(s.d) })
         }
       })
-      stats.pairs_found += pairs.size
 
       const last = chunk[chunk.length - 1]
       const stmts = [...pairs.values()].map(p =>
@@ -106,12 +136,34 @@ export async function runDuplicateScan(
           .prepare('INSERT OR IGNORE INTO duplicate_candidates (masjid_a, masjid_b, score, distance_m) VALUES (?, ?, ?, ?)')
           .bind(p.a, p.b, p.score, p.distance),
       )
-      stmts.push(db.prepare('UPDATE scan_state SET last_updated_at = ?, last_id = ? WHERE id = 1').bind(last.updated_at, last.id))
+      stmts.push(db.prepare('UPDATE scan_state SET last_updated_at = ?, last_id = ?, consecutive_failures = 0 WHERE id = 1').bind(last.updated_at, last.id))
       const written = await db.batch(stmts)
       stats.d1_calls++
+      stats.pairs_found += pairs.size
       for (const r of written.slice(0, -1)) {
         track(r.meta)
         stats.inserted += r.meta.changes ?? 0
+      }
+    }
+
+    // Normal mode: SCAN_BATCH masjids per search batch. After SCAN_FAILURES_BEFORE_SINGLE unfinished runs on the same
+    // cursor: one masjid per batch, and a masjid that still fails is skipped and recorded.
+    const step = single ? 1 : SCAN_BATCH
+    for (let i = 0; i < masjids.length; i += step) {
+      const chunk = masjids.slice(i, i + step)
+      const last = chunk[chunk.length - 1]
+      try {
+        await scanChunk(chunk)
+      } catch (err) {
+        if (!single) throw err
+        console.error('duplicate scan: skipping masjid', last.id, err)
+        skipped.push(last.id)
+        await db
+          .prepare('UPDATE scan_state SET last_updated_at = ?, last_id = ?, consecutive_failures = 0, skipped_ids = ? WHERE id = 1')
+          .bind(last.updated_at, last.id, JSON.stringify(skipped.slice(-SCAN_SKIPPED_CAP)))
+          .run()
+        stats.d1_calls++
+        stats.skipped++
       }
       cursorAt = last.updated_at
       cursorId = last.id
@@ -128,7 +180,7 @@ export async function runDuplicateScan(
     }
     await db
       .prepare(
-        `UPDATE scan_state SET last_updated_at = ?, last_id = ?, last_run_at = ?, last_run_scanned = ?, last_run_queued = ?, last_error = NULL
+        `UPDATE scan_state SET last_updated_at = ?, last_id = ?, last_run_at = ?, last_run_scanned = ?, last_run_queued = ?, last_error = NULL, consecutive_failures = 0
          WHERE id = 1`,
       )
       .bind(cursorAt, cursorId, runAt, stats.completed, stats.inserted)
@@ -151,14 +203,15 @@ export async function runDuplicateScan(
 }
 
 /** GET /admin/scan: the cursor, the last run and how many active masjids are still ahead of the cursor. */
-export async function scanStatus(db: D1Database) {
+export async function scanStatus(db: D1Database, now: Date = new Date()) {
   const state = await db
     .prepare(
-      `SELECT last_updated_at, last_id, last_run_at, last_run_scanned, last_run_queued, last_error FROM scan_state WHERE id = 1`,
+      `SELECT last_updated_at, last_id, last_run_at, last_run_scanned, last_run_queued, last_error, consecutive_failures, skipped_ids FROM scan_state WHERE id = 1`,
     )
     .first<{
       last_updated_at: string; last_id: number; last_run_at: string | null
       last_run_scanned: number; last_run_queued: number; last_error: string | null
+      consecutive_failures: number; skipped_ids: string
     }>()
   if (!state) throw new Error('scan_state row missing (migration 005 not applied?)')
   const remaining = await db
@@ -173,6 +226,10 @@ export async function scanStatus(db: D1Database) {
     last_run_scanned: state.last_run_scanned,
     last_run_queued: state.last_run_queued,
     last_error: state.last_error,
+    stalled:
+      state.last_error === RUNNING && state.last_run_at !== null && now.getTime() - Date.parse(state.last_run_at) > SCAN_STALL_MS,
+    consecutive_failures: state.consecutive_failures,
+    skipped_ids: parseIds(state.skipped_ids),
     masjids_remaining: remaining?.n ?? 0,
     max_masjids_per_run: SCAN_MAX_MASJIDS,
   }

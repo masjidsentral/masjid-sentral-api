@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { env, SELF } from 'cloudflare:test'
 import ngeohash from 'ngeohash'
 import { BASE, KEYS, api, bearer, createMasjid, getMasjid, spot } from './helpers'
-import { runDuplicateScan, SCAN_MAX_MASJIDS } from '../src/lib/scan'
+import { runDuplicateScan, scanStatus, SCAN_MAX_MASJIDS, SCAN_BATCH } from '../src/lib/scan'
 import worker from '../src/index'
 
 interface Err { error: string; code: string; details?: Record<string, any> }
@@ -14,7 +14,7 @@ interface Dup {
 }
 const admin = KEYS.admin.token
 
-const resetCursor = () => env.DB.prepare("UPDATE scan_state SET last_updated_at = '', last_id = 0, last_run_at = NULL, last_error = NULL WHERE id = 1").run()
+const resetCursor = () => env.DB.prepare("UPDATE scan_state SET last_updated_at = '', last_id = 0, last_run_at = NULL, last_error = NULL, consecutive_failures = 0, skipped_ids = '[]' WHERE id = 1").run()
 async function pair(a: number, b: number) {
   const [x, y] = [Math.min(a, b), Math.max(a, b)]
   return env.DB.prepare('SELECT * FROM duplicate_candidates WHERE masjid_a = ? AND masjid_b = ?').bind(x, y).all<Record<string, any>>()
@@ -261,8 +261,8 @@ describe('scan cost', () => {
     expect(stats.caught_up).toBe(false) // 1,020 masjids: the next runs continue
     expect(stats.completed).toBe(SCAN_MAX_MASJIDS)
     expect(stats.pairs_found).toBeGreaterThanOrEqual(3) // the first four grid masjids have a twin
-    // Free plan: 50 subrequests per invocation. State + select + 2 x (search + write batch) + final state update.
-    expect(stats.d1_calls).toBeLessThanOrEqual(8)
+    // Free plan: 50 subrequests per invocation. State + start mark + select + 6 x (search + write batch) + final state update = 16.
+    expect(stats.d1_calls).toBeLessThanOrEqual(20)
     // Each search reads a handful of index entries, not the table.
     expect(stats.rows_read / stats.scanned).toBeLessThan(60)
 
@@ -314,8 +314,8 @@ describe('scan resilience and status (H2)', () => {
     })
     await expect(runDuplicateScan(flaky, { maxMasjids: 130 })).rejects.toThrow('D1 exploded')
     const state = await env.DB.prepare('SELECT * FROM scan_state WHERE id = 1').first<Record<string, any>>()
-    expect(state!.last_id).toBe(ids[99].id)
-    expect(state!.last_run_scanned).toBe(100)
+    expect(state!.last_id).toBe(ids[24].id)
+    expect(state!.last_run_scanned).toBe(25)
     expect(state!.last_error).toContain('D1 exploded')
 
     const rest = await runDuplicateScan(env.DB, { maxMasjids: 130 })
@@ -335,5 +335,149 @@ describe('scan resilience and status (H2)', () => {
     expect(after.last_run_at).toBeTruthy()
     expect(after.cursor.id).toBeGreaterThan(0)
     for (const token of [KEYS.jm.token, KEYS.read.token]) expect((await get('/admin/scan', token)).status).toBe(403)
+  })
+})
+
+describe('scan stall visibility and poisoned-batch skip', () => {
+  const row = () => env.DB.prepare('SELECT * FROM scan_state WHERE id = 1').first<Record<string, any>>()
+  const status = async () => (await (await get('/admin/scan')).json()) as Record<string, any>
+
+  async function bulkPoison(n: number) {
+    const now = '2026-11-14T00:00:00Z'
+    for (let i = 0; i < n; i += 50) {
+      await env.DB.batch(Array.from({ length: Math.min(50, n - i) }, (_, k) => {
+        const j = i + k
+        const lat = 3.0 + Math.floor(j / 20) * 0.01
+        const lng = 101.0 + (j % 20) * 0.01
+        return env.DB
+          .prepare(
+            `INSERT INTO masjids (name, type_id, lat, lng, geohash, state_id, country_id, updated_at, created_at)
+             VALUES (?, 'masjid', ?, ?, ?, 'my-kul', 'my', ?, ?)`,
+          )
+          .bind(`Poison Test ${j}`, lat, lng, ngeohash.encode(lat, lng, 9), now, now)
+      }))
+    }
+  }
+
+  /** A DB whose search statements throw when they involve `badLat`. */
+  function poisonedDb(badLat: number) {
+    return new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            const st = target.prepare(sql)
+            const bind = st.bind.bind(st)
+            ;(st as any).bind = (...args: unknown[]) => {
+              const bound = bind(...args)
+              ;(bound as any).__args = args
+              return bound
+            }
+            return st
+          }
+        }
+        if (prop === 'batch') {
+          return async (stmts: any[]) => {
+            // search statements bind the lat/lng window around the masjid: poison the one that encloses badLat
+            const hits = (s: any) => {
+              const nums = ((s.__args ?? []) as unknown[]).filter((a): a is number => typeof a === 'number')
+              return nums.some(a => a < badLat && badLat - a < 0.01) && nums.some(a => a > badLat && a - badLat < 0.01)
+            }
+            if (stmts.some(hits)) {
+              throw new Error('poisoned row')
+            }
+            return target.batch(stmts)
+          }
+        }
+        const v = Reflect.get(target, prop, target)
+        return typeof v === 'function' ? v.bind(target) : v
+      },
+    })
+  }
+
+  it('a killed run (start written, never finished) shows as stalled once it is older than 15 minutes', async () => {
+    await resetCursor()
+    const start = new Date('2026-11-14T10:00:00Z')
+    await env.DB.prepare("UPDATE scan_state SET last_run_at = ?, last_error = 'running' WHERE id = 1").bind('2026-11-14T10:00:00Z').run()
+    expect((await scanStatus(env.DB, new Date(start.getTime() + 5 * 60_000))).stalled).toBe(false)
+    const late = await scanStatus(env.DB, new Date(start.getTime() + 16 * 60_000))
+    expect(late).toMatchObject({ stalled: true, last_error: 'running', last_run_at: '2026-11-14T10:00:00Z' })
+    // a real run replaces it and is not stalled
+    await runDuplicateScan(env.DB, { maxMasjids: 5 })
+    expect(await status()).toMatchObject({ stalled: false, last_error: null })
+    expect((await status()).consecutive_failures).toBe(0)
+  })
+
+  it('a run writes last_error = running with its start time before doing any work', async () => {
+    await resetCursor()
+    const t = new Date('2026-11-14T12:00:00Z')
+    let seen: Record<string, any> | null = null
+    const spy = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === 'batch') {
+          return async (stmts: D1PreparedStatement[]) => {
+            seen ??= await row()
+            return target.batch(stmts)
+          }
+        }
+        const v = Reflect.get(target, prop, target)
+        return typeof v === 'function' ? v.bind(target) : v
+      },
+    })
+    await runDuplicateScan(spy, { now: t, maxMasjids: 3 })
+    expect(seen).toMatchObject({ last_error: 'running', last_run_at: '2026-11-14T12:00:00Z' })
+  })
+
+  it('three failing runs on one batch: the next run skips the poisoned masjid, records it, scans the rest, counter resets', async () => {
+    await bulkPoison(40)
+    const ids = (await env.DB.prepare("SELECT id, lat FROM masjids WHERE name LIKE 'Poison Test %' ORDER BY updated_at, id").all<{ id: number; lat: number }>()).results
+    await resetCursor()
+    await env.DB.prepare("UPDATE scan_state SET last_updated_at = '2026-11-14T00:00:00Z', last_id = ? WHERE id = 1").bind(ids[0].id - 1).run()
+    const bad = ids[7]
+    // the poisoned masjid shares its lat with 19 others in the same row; make it unique
+    await env.DB.prepare('UPDATE masjids SET lat = lat + 0.005 WHERE id = ?').bind(bad.id).run()
+    const badLat = (await env.DB.prepare('SELECT lat FROM masjids WHERE id = ?').bind(bad.id).first<{ lat: number }>())!.lat
+    const poisoned = poisonedDb(badLat)
+
+    for (let n = 1; n <= 3; n++) {
+      await expect(runDuplicateScan(poisoned, { maxMasjids: 40 })).rejects.toThrow('poisoned row')
+      expect((await row())!.consecutive_failures).toBe(n)
+      expect((await row())!.last_id).toBe(ids[0].id - 1) // cursor never moved
+    }
+    expect(await status()).toMatchObject({ consecutive_failures: 3, skipped_ids: [] })
+
+    const stats = await runDuplicateScan(poisoned, { maxMasjids: 40 })
+    expect(stats.skipped).toBe(1)
+    const after = await status()
+    expect(after.skipped_ids).toEqual([bad.id])
+    expect(after.consecutive_failures).toBe(0)
+    expect(after.last_error).toBeNull()
+    expect(after.stalled).toBe(false)
+    // single mode covered the first SCAN_SINGLE_MAX masjids, including the ones around the poisoned one
+    expect(stats.scanned).toBe(20)
+    expect(stats.completed).toBe(20)
+    expect(after.cursor.id).toBe(ids[19].id)
+
+    // the rest is scanned normally afterwards, never revisiting the skipped masjid
+    const rest = await runDuplicateScan(poisoned, { maxMasjids: 20 })
+    expect(rest.scanned).toBe(20)
+    expect(rest.skipped).toBe(0)
+    expect((await status()).cursor.id).toBe(ids[39].id)
+    expect((await status()).skipped_ids).toEqual([bad.id])
+    expect(SCAN_BATCH).toBe(25)
+  })
+
+  it('the skipped list is capped at 100 (newest kept)', async () => {
+    await resetCursor()
+    const old = Array.from({ length: 100 }, (_, i) => i + 1)
+    await env.DB.prepare('UPDATE scan_state SET skipped_ids = ?, consecutive_failures = 3 WHERE id = 1').bind(JSON.stringify(old)).run()
+    const m = await mk(70, 'Masjid Skip Cap')
+    const poisoned = poisonedDb(m.lat)
+    const mrow = (await env.DB.prepare('SELECT updated_at FROM masjids WHERE id = ?').bind(m.id).first<{ updated_at: string }>())!
+    await env.DB.prepare('UPDATE scan_state SET last_updated_at = ?, last_id = ? WHERE id = 1').bind(mrow.updated_at, m.id - 1).run()
+    await runDuplicateScan(poisoned, { maxMasjids: 5 })
+    const list = (await status()).skipped_ids as number[]
+    expect(list).toHaveLength(100)
+    expect(list.at(-1)).toBe(m.id)
+    expect(list[0]).toBe(2)
   })
 })
