@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { SELF } from 'cloudflare:test'
+import { readHeaders } from './helpers'
 
 // Integration tests for GET /masjids/:id (APIREAD-08, APIREAD-09)
 
 describe('GET /masjids/:id', () => {
   it('returns full detail with related fields for a valid id (APIREAD-08)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids/1')
+    const response = await SELF.fetch('http://example.com/masjids/1', { headers: readHeaders() })
     // Either found (200) or not found (404) — either is valid depending on seed data
     expect([200, 404]).toContain(response.status)
     if (response.status === 200) {
@@ -34,7 +35,7 @@ describe('GET /masjids/:id', () => {
   })
 
   it('returns 404 with { error } for non-existent id (APIREAD-08)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids/999999999')
+    const response = await SELF.fetch('http://example.com/masjids/999999999', { headers: readHeaders() })
     expect(response.status).toBe(404)
     const body = await response.json() as { error: string }
     expect(typeof body.error).toBe('string')
@@ -42,7 +43,7 @@ describe('GET /masjids/:id', () => {
   })
 
   it('thumbnail_url is present in list response (APIREAD-09)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids')
+    const response = await SELF.fetch('http://example.com/masjids', { headers: readHeaders() })
     expect(response.status).toBe(200)
     const body = await response.json() as {
       data: Array<{ thumbnail_url: string | null }>

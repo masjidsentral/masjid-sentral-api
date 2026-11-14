@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { SELF } from 'cloudflare:test'
+import { writeHeaders } from './helpers'
 
 // Integration tests for write endpoints (POST /masjids, PATCH /masjids/:id)
 // Covers: APIWRITE-01, APIWRITE-02, APIWRITE-03, APIWRITE-04, APIWRITE-05, APIWRITE-06
-
-const TEST_AUTH_HEADER = 'Bearer test-api-key-dev'
 
 const VALID_POST_BODY = {
   name: 'Test Masjid Integration',
@@ -21,10 +20,7 @@ describe('POST /masjids', () => {
   it('returns 201 with created resource (APIWRITE-01)', async () => {
     const response = await SELF.fetch('http://example.com/masjids', {
       method: 'POST',
-      headers: {
-        'Authorization': TEST_AUTH_HEADER,
-        'Content-Type': 'application/json',
-      },
+      headers: writeHeaders(),
       body: JSON.stringify(VALID_POST_BODY),
     })
     expect(response.status).toBe(201)
@@ -43,10 +39,7 @@ describe('PATCH /masjids/:id', () => {
     // First create a masjid via POST
     const postResponse = await SELF.fetch('http://example.com/masjids', {
       method: 'POST',
-      headers: {
-        'Authorization': TEST_AUTH_HEADER,
-        'Content-Type': 'application/json',
-      },
+      headers: writeHeaders(),
       body: JSON.stringify(VALID_POST_BODY),
     })
     expect(postResponse.status).toBe(201)
@@ -56,10 +49,7 @@ describe('PATCH /masjids/:id', () => {
     // Then PATCH it
     const patchResponse = await SELF.fetch(`http://example.com/masjids/${createdId}`, {
       method: 'PATCH',
-      headers: {
-        'Authorization': TEST_AUTH_HEADER,
-        'Content-Type': 'application/json',
-      },
+      headers: writeHeaders(),
       body: JSON.stringify({ name: 'Test Masjid Integration Updated' }),
     })
     expect(patchResponse.status).toBe(200)
