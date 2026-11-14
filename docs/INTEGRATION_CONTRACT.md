@@ -289,7 +289,7 @@ X-Sentral-Delivery: dlv_01JD…
 ## 9. Build order for your agent
 
 1. **Schema in your app.** Add to your masjid table: `sentral_id INTEGER UNIQUE NULL` and `sentral_version INTEGER NOT NULL DEFAULT 0`. Add the same two columns to your programme table. Add a table `sentral_outbox(id, entity, local_id, sentral_id, op, payload_json, base_version, attempts, next_attempt_at, last_error, status)` and a table `sentral_cursor(last_seq)`.
-2. **Initial link (one-off job, resumable).** No links exist yet: the 11,429 Sentral masjids were loaded from Qiyam's and JM's datasets (`source` = `qiyam` / `jejak_masjid`), but no app id was kept, and the loader merged anything within 500 m regardless of name. Expect some Sentral rows to stand for two of your places. **Links are one-to-one:** if a Sentral row is already linked to another of your masjids, do not link a second one; send both to the review list. For each local masjid without `sentral_id`:
+2. **Initial link (one-off job, resumable).** **Rebuild (maintainers 2026-11-14):** the old v1.0 import kept no app ids and over-merged, so Sentral's masjid table is rebuilt empty. **JM's link job runs first** and creates the base set; **Qiyam's link job runs after JM's finishes** and matches against it. Do not start Qiyam's run until the maintainers say JM's is done. The job is the import: there is no CSV step. **Re-run it nightly** until your outbound sync (step 3) is live, so masjids added in your app in the meantime are picked up. It only touches masjids without a `sentral_id`, so re-runs are safe. **Links are one-to-one:** if a Sentral row is already linked to another of your masjids, do not link a second one; send both to the review list. For each local masjid without `sentral_id`:
    - `GET /masjids/by-external/{you}/{local_id}`. Found → link.
    - Else `GET /masjids/match?lat&lng&name`. If the top candidate has `score ≥ 0.9` and `distance_m ≤ 50` → `PUT /masjids/{id}/external-ids/{you}`, then link.
    - Else if the top candidate has `score ≥ 0.6` → write it to a review list for a person. Do not auto-link.
@@ -298,6 +298,7 @@ X-Sentral-Delivery: dlv_01JD…
    - Programmes: link or create the same way, using `/events/by-external`.
    - When done: `GET /changes/latest` → save as the cursor.
 3. **Outbound.** At every place your app commits a masjid-detail or programme change (after your own moderation), insert an outbox row in the same transaction. A worker drains the outbox (§5.4).
+   - **Add-masjid flow (SHOULD):** before a user submits a new masjid, call `GET /masjids/match` from your backend and show the candidates ("Is it one of these?"). If the user picks one, create your local masjid from that Sentral record and link it. Do not POST a new one. Show the same candidates to your moderator at approval time. On `409 possible_duplicate`, link to a candidate or let a person confirm `?force=true`. Never auto-force.
 4. **Inbound pull.** A job that loops `GET /changes?after=cursor` until `has_more: false`, applying §6.3. Schedule it every ≤15 min. Also trigger it from the webhook.
 5. **Webhook receiver** (§7).
 6. **Reads.** Your app may keep reading its local copy. Use Sentral reads for linking, backfill and checks. Do not proxy end-user traffic through Sentral.
