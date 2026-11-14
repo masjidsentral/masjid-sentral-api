@@ -12,11 +12,17 @@ export interface Limiter {
 // Matches the wrangler `ratelimits` period (60 s window).
 export const RETRY_AFTER_SECONDS = 60
 
+let warned = false
+
 export function createRateLimit(getLimiter: (env: CloudflareBindings) => Limiter | undefined) {
   return createMiddleware<AppEnv>(async (c, next) => {
     // No key = public path (auth has already rejected everything else).
     const key = c.get('key')
     const limiter = getLimiter(c.env)
+    if (!limiter && !warned) {
+      warned = true
+      console.warn('RATE_LIMITER binding is missing: rate limiting is DISABLED')
+    }
     if (key && limiter) {
       const { success } = await limiter.limit({ key: `key:${key.id}` })
       if (!success) {

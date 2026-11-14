@@ -4,7 +4,7 @@ import openApiSpec from '../openapi.json' with { type: 'json' }
 import { masjidsRouter } from './routes/masjids'
 import { statesRouter } from './routes/states'
 import { citiesRouter } from './routes/cities'
-import { authMiddleware, writeGuard, type AppEnv } from './middleware/auth'
+import { authMiddleware, requireScope, writeGuard, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { ApiError, errorBody } from './lib/errors'
 
@@ -14,6 +14,9 @@ const app = new Hono<AppEnv>()
 // Every route needs a key except GET / and GET /openapi.json (handled inside authMiddleware).
 app.use('*', authMiddleware)
 app.use('*', rateLimitMiddleware)
+// Admin fails closed: every /admin route (any method) needs the admin scope.
+app.use('/admin', requireScope('admin'))
+app.use('/admin/*', requireScope('admin'))
 app.use('*', writeGuard)
 
 app.get('/openapi.json', (c) => {
@@ -34,9 +37,14 @@ app.onError((err, c) => {
     return c.json(errorBody(err.message, err.code, err.details), err.status as 401, err.headers)
   }
   if (err instanceof HTTPException) {
-    const res = err.getResponse()
+    if (err.status >= 500) {
+      console.error(err)
+      return c.json(errorBody('Internal server error', 'internal'), 500)
+    }
     const code = err.status === 401 ? 'unauthorized' : err.status === 403 ? 'forbidden' : err.status === 404 ? 'not_found' : 'validation_failed'
-    return c.json(errorBody(err.message || 'Request failed', code), err.status as 401, Object.fromEntries(res.headers))
+    const headers = Object.fromEntries(err.getResponse().headers)
+    delete headers['content-type']
+    return c.json(errorBody(err.message || 'Request failed', code), err.status as 401, headers)
   }
   console.error(err)
   return c.json(errorBody('Internal server error', 'internal'), 500)

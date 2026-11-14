@@ -1,12 +1,17 @@
 // Test helpers: seeded API keys and request builders.
 // Keys are inserted by tests/setup.ts after migrations (migration 003 removes the dev key).
 
+/** Test token in the issued format: ms_live_ + 43 base64url chars. */
+export function tok(name: string): string {
+  return 'ms_live_' + name.padEnd(43, '_')
+}
+
 export const KEYS = {
-  read:    { token: 'test-key-read',    app_id: null,           scopes: 'read' },
-  jm:      { token: 'test-key-jm',      app_id: 'jejak_masjid', scopes: 'read,write' },
-  qiyam:   { token: 'test-key-qiyam',   app_id: 'qiyam',        scopes: 'read,write' },
-  webhook: { token: 'test-key-webhook', app_id: 'qiyam_hooks',  scopes: 'read,write,webhook' },
-  admin:   { token: 'test-key-admin',   app_id: 'sentral_admin', scopes: 'admin' },
+  read:    { token: tok('read'),    app_id: null,           scopes: 'read' },
+  jm:      { token: tok('jm'),      app_id: 'jejak_masjid', scopes: 'read,write' },
+  qiyam:   { token: tok('qiyam'),   app_id: 'qiyam',        scopes: 'read,write' },
+  webhook: { token: tok('webhook'), app_id: 'qiyam_hooks',  scopes: 'read,write,webhook' },
+  admin:   { token: tok('admin'),   app_id: 'sentral_admin', scopes: 'admin' },
 } as const
 
 export const DEV_KEY_TOKEN = 'test-api-key-dev'

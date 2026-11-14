@@ -14,7 +14,7 @@ export interface AuthKey {
 
 export type AppEnv = {
   Bindings: CloudflareBindings
-  Variables: { key: AuthKey }
+  Variables: { key: AuthKey; actor?: string }
 }
 
 // ─── SHA-256 helper ───────────────────────────────────────────────────────────
@@ -27,6 +27,10 @@ export async function hashToken(token: string): Promise<string> {
     .join('')
 }
 
+// Issued token format (scripts/issue-key.mjs): ms_live_ + base64url of 32 random bytes (43 chars).
+// Anything else is rejected without a D1 query.
+export const TOKEN_FORMAT = /^ms_live_[A-Za-z0-9_-]{43}$/
+
 const PUBLIC_PATHS = new Set(['/', '/openapi.json'])
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
@@ -36,7 +40,7 @@ export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
 
   const header = c.req.header('Authorization') ?? ''
   const match = /^Bearer\s+(\S+)$/i.exec(header)
-  if (!match) throw new ApiError(401, 'unauthorized', 'Missing or invalid API key')
+  if (!match || !TOKEN_FORMAT.test(match[1])) throw new ApiError(401, 'unauthorized', 'Missing or invalid API key')
 
   const hash = await hashToken(match[1])
   const row = await c.env.DB
@@ -68,33 +72,46 @@ export function requireScope(scope: Scope) {
 }
 
 const MUTATING = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/
+
+function validateActor(raw: string | undefined): string {
+  const actor = raw?.trim() ?? ''
+  if (actor.length < 1 || actor.length > 128 || CONTROL_CHARS.test(actor)) {
+    throw new ApiError(
+      422, 'validation_failed',
+      'X-Sentral-Actor header is required (1-128 characters, no control characters)',
+      { field: 'X-Sentral-Actor' },
+    )
+  }
+  return actor
+}
 
 /**
- * Guard for every mutating request outside /admin (admin routes require the
- * `admin` scope via requireScope('admin') in their own router).
- * Needs the `write` scope, a key with an app_id, and X-Sentral-Actor (1-128 chars).
+ * Guard for every mutating request. Always needs a valid X-Sentral-Actor.
+ * Outside /admin it also needs the `write` scope and a key with an app_id
+ * (admin routes get their scope check from requireScope('admin') in index.ts).
  */
 export const writeGuard = createMiddleware<AppEnv>(async (c, next) => {
   if (!MUTATING.has(c.req.method)) return next()
-  if (c.req.path === '/admin' || c.req.path.startsWith('/admin/')) return next()
+  const isAdmin = c.req.path === '/admin' || c.req.path.startsWith('/admin/')
 
-  const key = c.get('key')
-  if (!key.scopes.includes('write')) {
-    throw new ApiError(403, 'forbidden', "API key lacks the 'write' scope", { required_scope: 'write' })
+  if (!isAdmin) {
+    const key = c.get('key')
+    if (!key.scopes.includes('write')) {
+      throw new ApiError(403, 'forbidden', "API key lacks the 'write' scope", { required_scope: 'write' })
+    }
+    if (!key.app_id) {
+      throw new ApiError(403, 'forbidden', 'API key has no app_id; it cannot write')
+    }
   }
-  if (!key.app_id) {
-    throw new ApiError(403, 'forbidden', 'API key has no app_id; it cannot write')
-  }
-  const actor = c.req.header('X-Sentral-Actor')
-  if (actor === undefined || actor.length < 1 || actor.length > 128) {
-    throw new ApiError(422, 'validation_failed', 'X-Sentral-Actor header is required (1-128 characters)', {
-      field: 'X-Sentral-Actor',
-    })
-  }
+  c.set('actor', validateActor(c.req.header('X-Sentral-Actor')))
   return next()
 })
 
-/** The validated actor for the current write. Only call after writeGuard. */
-export function getActor(c: { req: { header(name: string): string | undefined } }): string {
-  return c.req.header('X-Sentral-Actor') as string
+/** The validated actor for the current write. Throws (500) if writeGuard did not run. */
+export function getActor(c: { get(name: 'actor'): string | undefined }): string {
+  const actor = c.get('actor')
+  if (!actor) throw new Error('getActor() called without a validated actor (writeGuard missing)')
+  return actor
 }

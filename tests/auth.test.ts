@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import app from '../src/index'
 import { SELF, env } from 'cloudflare:test'
 import { Hono } from 'hono'
-import { KEYS, DEV_KEY_TOKEN, bearer, readHeaders, writeHeaders, sha256Hex } from './helpers'
+import { KEYS, tok, DEV_KEY_TOKEN, bearer, readHeaders, writeHeaders, sha256Hex } from './helpers'
 import { authMiddleware, type AppEnv } from '../src/middleware/auth'
 import { createRateLimit } from '../src/middleware/rate-limit'
 import { errorBody } from '../src/lib/errors'
@@ -46,7 +46,7 @@ describe('authentication', () => {
   })
 
   it('a revoked key -> 401', async () => {
-    const token = 'test-key-revoked'
+    const token = tok('revoked')
     await env.DB
       .prepare(`INSERT INTO api_keys (key_hash, name, app_id, scopes, revoked_at) VALUES (?, 'revoked', 'qiyam', 'read,write', '2026-11-14T00:00:00Z')`)
       .bind(await sha256Hex(token)).run()
@@ -54,7 +54,7 @@ describe('authentication', () => {
   })
 
   it('an inactive key (is_active = 0) -> 401', async () => {
-    const token = 'test-key-inactive'
+    const token = tok('inactive')
     await env.DB
       .prepare(`INSERT INTO api_keys (key_hash, name, app_id, scopes, is_active) VALUES (?, 'inactive', 'qiyam', 'read', 0)`)
       .bind(await sha256Hex(token)).run()
@@ -98,7 +98,7 @@ describe('write scope, app_id and actor', () => {
   })
 
   it('a write key without an app_id -> 403', async () => {
-    const token = 'test-key-no-app'
+    const token = tok('noapp')
     await env.DB
       .prepare(`INSERT INTO api_keys (key_hash, name, app_id, scopes) VALUES (?, 'noapp', NULL, 'read,write')`)
       .bind(await sha256Hex(token)).run()
