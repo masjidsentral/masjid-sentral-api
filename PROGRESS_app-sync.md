@@ -205,15 +205,35 @@ Interpretations / things for the orchestrator
 6. No endpoint triggers a scan on demand; the daily cron only. To test locally call `runDuplicateScan(env.DB)`.
 7. The `ms_live_` admin test key has `app_id: sentral_admin`; a production admin key may have a null `app_id`; both work (`beginWrite` falls back to `sentral_admin`).
 
-### Consolidated owner deploy checklist (S1-S4)
+### Consolidated owner deploy checklist (S1-S4, updated after the S4 review)
 
 1. Ship S1-S4 together, never S1 alone (reads need keys from S1; 004 empties masjid data).
 2. Check remote `d1_migrations`: `001` and `002` recorded and `api_keys` present (record them by hand first if they were applied outside wrangler).
-3. D1 Time Travel bookmark of `masjidsentral` (004 is destructive).
-4. Apply migrations `003`, `004`, `005` remotely **before** deploying (new auth reads 003's columns; the daily cron reads 005's tables).
-5. Issue keys with `scripts/issue-key.mjs <app_id> <scopes>` and insert them **before** the deploy: `qiyam` (read,write), `jejak_masjid` (read,write), an admin key (admin), and a `webhook`-scoped key per receiving app (it needs an `app_id`; may be the app's own key with `read,write,webhook`).
-6. Rate-limit namespace: set a valid unique `namespace_id` for `RATE_LIMITER` in `wrangler.jsonc` ("1001" is a placeholder), 600 per 60 s.
-7. Deploy the Worker; it registers two crons: `* * * * *` (webhook dispatch, idempotency sweep) and `0 19 * * *` (duplicate scan, 03:00 MYT). Check both appear in the dashboard.
-8. Register webhooks with the admin key: `POST /admin/webhooks { api_key_id, url }` for Qiyam and JM (https only; secret shown once; duplicate registration is 409 `already_exists`).
-9. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch the first `0 19 * * *` run in the logs (`duplicate scan {...}` JSON line); if it is CPU-limited, lower `SCAN_MAX_MASJIDS`.
-10. `web/` dev portal still documents keyless reads (owner, out of scope).
+3. Check the account plan before relying on the scan: the free plan allows 50 subrequests and 10 ms CPU per invocation. A scan run is about 7 D1 calls, but Jaro-Winkler on 150 masjids may exceed 10 ms CPU on free; on the paid plan it is fine. `GET /admin/scan` shows `last_error` after the first runs; lower `SCAN_MAX_MASJIDS` (`src/lib/scan.ts`) if a run fails.
+4. **Reference-table diff before migrating** (review M2): diff prod `countries`, `states`, `cities`, `masjid_types` against 001 HEAD (`SELECT * FROM ...` vs the INSERTs in `001_initial.sql`). 005 adds `mini-surau` and removes `musolla` from `masjid_types`; any other drift (missing states/cities, renamed ids) must be fixed by hand first, because 004 recreates `masjids` with FKs to them.
+5. D1 Time Travel bookmark of `masjidsentral` (004 is destructive). Write the bookmark down.
+6. Prepare the Worker build, the keys and the webhook calls so the next four steps run **back to back**: migrations, keys, deploy, crons and webhooks. The old Worker breaks as soon as 004 drops `source` (it writes `masjids.source`), so do not leave a gap.
+7. Apply migrations `003`, `004`, `005` remotely (new auth reads 003's columns; the hourly cron reads 005's tables).
+8. Issue keys with `scripts/issue-key.mjs <app_id> <scopes>` and insert them: `qiyam` (read,write), `jejak_masjid` (read,write), an admin key (admin), and a `webhook`-scoped key per receiving app (it needs an `app_id`; may be the app's own key with `read,write,webhook`).
+9. Rate-limit `namespace_id`: "1001" is fine as long as it is unique on this Cloudflare account (no other Worker uses it); 600 per 60 s.
+10. Deploy the Worker; it registers two crons: `* * * * *` (webhook dispatch, idempotency sweep) and `0 * * * *` (duplicate scan, hourly, 150 masjids per run). Check both appear in the dashboard.
+11. Register webhooks with the admin key: `POST /admin/webhooks { api_key_id, url }` for Qiyam and JM (https only; secret shown once; duplicate registration is 409 `already_exists`).
+12. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch `GET /admin/scan` (cursor, `masjids_remaining`, `last_error`) and the first `duplicate scan {...}` log lines.
+13. **Rollback = D1 Time Travel restore to the step-5 bookmark AND a Worker rollback, never the Worker alone** (the old Worker cannot run on the 004 schema, and the new one cannot run on the old schema). Writes made after the migration are lost by the restore; tell Qiyam and JM first.
+14. `web/` dev portal still documents keyless reads (owner, out of scope).
+
+## S4 review fixes (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+Opus release review of S4; migrations 004 and 005 amended in place (not applied anywhere). Tests: 355 passing, `tsc --noEmit` clean.
+
+Client-visible changes (for the contract)
+- **Revert is field-level (H1).** `POST /admin/changes/:seq/revert` restores only the fields in that change's `changed_fields`, from its `before_json`. External ids: only the ids that change added/removed are undone (never the whole set); contacts/facilities/images only when listed. If a later change to the same entity touched any of those fields: 422 `stale_revert` with `details.later_seqs` (first 50) and `details.fields`; `?force=true` overrides and the new change's `data` carries `forced: true`. Create revert (soft delete) and delete revert (restore active, full state) are unchanged. New 422 reason `nothing_to_revert`. New error code `stale_revert` (admin-only).
+- **Merge change order (M1):** loser `merge` first, then each moved programme `update`, then the survivor `update` (all `sentral_admin`). The response of `POST /admin/masjids/:id/merge` is still the merged loser (unchanged; the brief said "survivor" but the loser is what the contract and the tests had, so it was kept).
+- **Merge `reason` is private (L3):** no longer in `data`/`after_json`/`/changes`; stored in `changes.admin_note` (new nullable column, never returned).
+- **Revert actor (L1):** `revert:<seq>:<admin actor>`. Merge already records the admin actor.
+- **Idempotency-Key is required (L4)** on `POST /admin/masjids/:id/merge`, `/admin/changes/:seq/revert`, `/admin/duplicates/:id/merge` and `/admin/duplicates/:id/dismiss` (422 `validation_failed` when missing). Dismiss now replays a stored response.
+- **Merge queue hygiene (L4):** the loser's other pending pairs are re-pointed to the survivor (INSERT OR IGNORE of the `(min,max)` pair, self-pairs skipped), then the old rows are `dismissed`. Merge chains are flattened: masjids already merged into the loser now have `merged_into` = survivor (no version bump, no change row), so a 301 is one hop. Deleting a masjid (DELETE or revert-of-create) dismisses its pending pairs. Dismiss and merge record `resolved_by` (admin actor) and `resolved_at` on the row (not returned).
+- **Scan (H2):** hourly cron `0 * * * *` (replaces `0 19 * * *`), `SCAN_MAX_MASJIDS` = 150, cursor persisted after each search batch together with that batch's pairs (one atomic D1 batch); a failed run records `last_error` and keeps the finished batches' cursor. `scan_state` gains `last_run_scanned`, `last_run_queued`, `last_error`. New `GET /admin/scan` (admin scope): `{ cursor: {updated_at, id}, last_run_at, last_run_scanned, last_run_queued, last_error, masjids_remaining, max_masjids_per_run }`.
+- **Reference data (M2):** 005 inserts `mini-surau` into `masjid_types` (INSERT OR IGNORE, same values as 001) and deletes `musolla` (guarded by NOT EXISTS on masjids). Deploy checklist step 4 diffs the reference tables first.
+- **openapi.json (L2):** 422 added to `/masjids`, `/masjids/nearby`, `/masjids/match`, `/events`, `/masjids/{id}/events`, `/changes`, `/cities`, `/admin/duplicates`; `stale_revert` in the Error enum; `ChangeDataExtras` (`via_merge`, `moved_external_ids`, `merged_into`, `forced`, all optional) on `Change.data`; `GET /admin/scan`; `force` query param; Idempotency-Key required on the four admin writes. No 410. `tests/openapi.test.ts` extended (422 on reads, scan route, extras, required idem key).
+- Deploy checklist rewritten (back-to-back steps, rollback = Time Travel + Worker rollback, plan/CPU check, namespace_id, reference-table diff).
