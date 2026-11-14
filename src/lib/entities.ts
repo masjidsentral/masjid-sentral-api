@@ -113,17 +113,29 @@ export async function hydrateMasjids(db: D1Database, rows: MasjidScalars[]): Pro
     db.prepare('SELECT masjid_id, url, is_thumbnail, sort_order FROM masjid_images WHERE masjid_id IN (SELECT value FROM json_each(?)) ORDER BY sort_order, id').bind(ids),
     db.prepare('SELECT masjid_id, app_id, external_id FROM masjid_external_ids WHERE masjid_id IN (SELECT value FROM json_each(?)) ORDER BY app_id, external_id').bind(ids),
   ])
+  const byContact = groupBy(contacts.results as Array<ContactRow & { masjid_id: number }>, r => r.masjid_id)
+  const byFacility = groupBy(facilities.results as Array<FacilityRow & { masjid_id: number }>, r => r.masjid_id)
+  const byImage = groupBy(images.results as Array<ImageRow & { masjid_id: number }>, r => r.masjid_id)
+  const byExternal = groupBy(externals.results as Array<ExternalRow & { masjid_id: number }>, r => r.masjid_id)
   return rows.map(m => buildMasjid(
     m,
-    groupBy(contacts.results as Array<ContactRow & { masjid_id: number }>, m.id),
-    groupBy(facilities.results as Array<FacilityRow & { masjid_id: number }>, m.id),
-    groupBy(images.results as Array<ImageRow & { masjid_id: number }>, m.id),
-    groupBy(externals.results as Array<ExternalRow & { masjid_id: number }>, m.id),
+    byContact.get(m.id) ?? [],
+    byFacility.get(m.id) ?? [],
+    byImage.get(m.id) ?? [],
+    byExternal.get(m.id) ?? [],
   ))
 }
 
-function groupBy<T extends { masjid_id?: number; event_id?: number }>(rows: T[], id: number): T[] {
-  return rows.filter(r => (r.masjid_id ?? r.event_id) === id)
+/** Groups rows by key once (row order is kept inside each group). */
+function groupBy<T>(rows: T[], key: (row: T) => number): Map<number, T[]> {
+  const map = new Map<number, T[]>()
+  for (const r of rows) {
+    const k = key(r)
+    const list = map.get(k)
+    if (list) list.push(r)
+    else map.set(k, [r])
+  }
+  return map
 }
 
 export type { MasjidScalars }
@@ -214,7 +226,8 @@ export async function hydrateEvents(db: D1Database, rows: EventScalars[]): Promi
     .prepare('SELECT event_id, app_id, external_id FROM event_external_ids WHERE event_id IN (SELECT value FROM json_each(?)) ORDER BY app_id, external_id')
     .bind(JSON.stringify(rows.map(r => r.id)))
     .all<ExternalRow & { event_id: number }>()
-  return rows.map(e => buildEvent(e, groupBy(ext.results, e.id)))
+  const byEvent = groupBy(ext.results, r => r.event_id)
+  return rows.map(e => buildEvent(e, byEvent.get(e.id) ?? []))
 }
 
 /** Full programme entity, any status. */

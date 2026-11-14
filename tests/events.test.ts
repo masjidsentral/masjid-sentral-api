@@ -82,7 +82,8 @@ describe('POST /masjids/:id/events', () => {
       EVENT({ end_at: at(2) }), // before start
       EVENT({ start_at: '2026-11-20 10:00' }),
       EVENT({ start_at: '2026-02-30T10:00:00Z' }),
-      EVENT({ start_at: '2026-11-20T10:00:00+08:00' }),
+      EVENT({ start_at: '2026-11-20T10:00:00+25:00' }),
+      EVENT({ start_at: '2026-11-20T10:00:00+08' }),
       EVENT({ poster_url: 'http://cdn.example/p.jpg' }),
       EVENT({ registration_url: 'ftp://x' }),
       EVENT({ status: 'deleted' }),

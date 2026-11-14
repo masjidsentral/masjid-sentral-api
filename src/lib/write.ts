@@ -70,15 +70,28 @@ export interface WriteSpec {
   changeExtra?: Record<string, unknown>
   /** Override the change's origin_app (admin writes use "sentral_admin"). */
   originApp?: string
+  /**
+   * Conditions that must hold at commit time, checked inside the batch BEFORE the entity write (e.g. "the masjid
+   * is still active"). `condition` is a SQL boolean expression with `?` binds. A false condition aborts the whole
+   * batch with the `precondition_guard` constraint (distinct from the version guard) and the commit reports
+   * `{ ok: false, reason: 'precondition' }`.
+   */
+  preGuards?: Array<{ condition: string; binds?: unknown[] }>
+  /** Builds the error for a lost pre-guard (default: 404 not_found). */
+  onPreconditionLost?: () => Promise<ApiError>
+  /** In a multi-spec commit, the spec whose entity/status is the idempotent response (default: the first). */
+  respond?: boolean
 }
+
+export type LostReason = 'version' | 'precondition'
 
 export type CommitResult =
   | { ok: true; seq: number; entity: { id: number; version: number }; status: number }
-  | { ok: false }
+  | { ok: false; reason: LostReason }
 
 export type CommitManyResult =
-  | { ok: true; results: Array<{ seq: number; entity: { id: number; version: number } }>; status: number }
-  | { ok: false }
+  | { ok: true; results: Array<{ seq: number; entity: { id: number; version: number } }>; status: number; responseIndex: number }
+  | { ok: false; reason: LostReason }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -194,11 +207,22 @@ export function isVersionGuardError(err: unknown): boolean {
   return false
 }
 
+/** True when a batch error is a lost pre-guard (a precondition that stopped holding). */
+export function isPreconditionError(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 4; depth++) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('precondition_guard')) return true
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
 /** Builds the batch for one or more entity writes (one idempotency row for the request, one enqueue). */
 export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: string): { stmts: D1PreparedStatement[]; entityIdx: number[] } {
   const { db } = ctx
   const stmts: D1PreparedStatement[] = []
   const entityIdx: number[] = []
+  const respondIndex = Math.max(0, specs.findIndex(sp => sp.respond))
   const changeCols = 'entity, entity_id, masjid_id, op, version, origin_app, actor, changed_fields, before_json, after_json, occurred_at'
 
   specs.forEach((spec, index) => {
@@ -215,6 +239,12 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
     const version = spec.after.version
     const afterExpr = isCreate ? `json_set(?, '$.id', ${entityIdSql})` : '?'
 
+    for (const g of spec.preGuards ?? []) {
+      stmts.push(
+        db.prepare(`INSERT INTO batch_precondition (ok) SELECT CASE WHEN ${g.condition} THEN 1 ELSE 0 END`).bind(...(g.binds ?? [])),
+        db.prepare('DELETE FROM batch_precondition'),
+      )
+    }
     entityIdx.push(stmts.length)
     stmts.push(spec.entityStatement)
     if (!isCreate) {
@@ -229,7 +259,7 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
         `INSERT INTO changes (${changeCols}) VALUES (?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ${afterExpr}, ?)`,
       ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, changeAfterJson, now),
     )
-    if (index === 0) {
+    if (index === respondIndex) {
       // The stored response is the first entity (the primary one).
       const respExpr = isCreate ? `json_set(?, '$.id', ${LAST_CHANGE_ENTITY_ID})` : '?'
       stmts.push(
@@ -286,7 +316,8 @@ export async function runCommitMany(ctx: WriteCtx, specs: WriteSpec[], now: stri
   try {
     results = await ctx.db.batch(stmts)
   } catch (err) {
-    if (isVersionGuardError(err)) return { ok: false }
+    if (isPreconditionError(err)) return { ok: false, reason: 'precondition' }
+    if (isVersionGuardError(err)) return { ok: false, reason: 'version' }
     throw err
   }
 
@@ -300,13 +331,14 @@ export async function runCommitMany(ctx: WriteCtx, specs: WriteSpec[], now: stri
       .first<{ seq: number }>()
     out.push({ seq: seqRow?.seq ?? 0, entity })
   }
-  return { ok: true, results: out, status: specs[0].status }
+  const responseIndex = Math.max(0, specs.findIndex(sp => sp.respond))
+  return { ok: true, results: out, status: specs[responseIndex].status, responseIndex }
 }
 
 /** Single-entity commit: the one-spec case of runCommitMany. */
 export async function runCommit(ctx: WriteCtx, spec: WriteSpec, now: string = isoNow()): Promise<CommitResult> {
   const r = await runCommitMany(ctx, [spec], now)
-  if (!r.ok) return { ok: false }
+  if (!r.ok) return { ok: false, reason: r.reason }
   return { ok: true, seq: r.results[0].seq, entity: r.results[0].entity, status: r.status }
 }
 
@@ -330,29 +362,31 @@ export async function replayOnConflict(
   }
 }
 
-export async function commitWrite(c: Context<AppEnv>, ctx: WriteCtx, spec: WriteSpec): Promise<Response> {
-  let result: CommitResult
+export async function commitWrite(c: Context<AppEnv>, ctx: WriteCtx, spec: WriteSpec | WriteSpec[]): Promise<Response> {
+  const specs = Array.isArray(spec) ? spec : [spec]
+  let result: CommitManyResult
   try {
-    result = await runCommit(ctx, spec)
+    result = await runCommitMany(ctx, specs)
   } catch (err) {
-    // Two requests with the same Idempotency-Key racing: the loser's idempotency insert violates the PK
-    // and the whole batch rolls back. Answer it from the winner's stored response.
     const replay = await lookupIdempotent(ctx)
     if (replay) return replay
     throw err
   }
 
   if (!result.ok) {
-    // Guard lost: same key retried while the first attempt won -> replay (M1); otherwise a real conflict.
     const replay = await lookupIdempotent(ctx)
     if (replay) return replay
-    throw versionConflict(spec.loadCurrent ? await spec.loadCurrent() : null)
+    if (result.reason === 'precondition') {
+      const lost = specs.find(sp => sp.onPreconditionLost)
+      throw lost ? await lost.onPreconditionLost!() : new ApiError(404, 'not_found', 'A precondition for this write no longer holds')
+    }
+    const current = specs.find(sp => sp.loadCurrent)
+    throw versionConflict(current ? await current.loadCurrent!() : null)
   }
 
   try {
     c.executionCtx.waitUntil(dispatchDue(c.env.DB).catch(err => console.error('webhook dispatch failed', err)))
   } catch {
-    // No execution context (unit tests): the cron picks the ping up.
   }
-  return c.json(result.entity, spec.status)
+  return c.json(result.results[result.responseIndex].entity, specs[result.responseIndex].status)
 }

@@ -133,3 +133,32 @@ Interpretations / deviations (orchestrator: review for the contract)
 Contract §10 checks shown at server level in `tests/s3-masjids.test.ts` / `tests/events.test.ts`: 2, 3, 7, 8, 9, 11 (plus programme 409/idempotency/race).
 
 Not done / for S4: admin routes, merge (so check 10), revert, duplicate scan, `openapi.json` v1.1 (still v1.0; `openapi.test.ts` unchanged), README.
+
+## S3 review fixes (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+Commits: schema repo `da433bd` (004 gains `batch_precondition`, amended in place, not applied anywhere); `api`: `fix(sync)` search window + matching, `fix(sync)` pre-guards / linking / cascade / relink / timestamps / low fixes, this note. Tests: 308 passing (`npx vitest run`), `npx tsc --noEmit` clean. New tests: `tests/s3-review.test.ts`, additions in `tests/match.test.ts`.
+
+What a client can see (for the contract)
+1. **Nearby / match cost.** Same results. Candidate search now uses a lat/lng box plus at most 16 geohash cells (finest precision 1-8 chars), forced onto `idx_masjids_geohash` (without stats SQLite chose the status index and scanned every active masjid). No response change.
+2. **Pre-guards.** Programme POST / PATCH / DELETE / link on a masjid that is not active: 404 `not_found` (`details.merged_into` when the masjid is merged), also when the status changes between the handler's reads and the commit. New table `batch_precondition` (constraint `precondition_guard`) in 004; a lost version race is still 409 `version_conflict`. `PATCH`/`DELETE` of a programme on a non-active masjid used to succeed: now 404.
+3. **New endpoint** `PUT /events/{id}/external-ids/{app_id}` body `{ "external_id": "..." }`: own app only (else 403), one id per app per programme, same id = 200 no-op, `Idempotency-Key` optional, no `If-Match`; 200 with the programme (version +1) and an `event` `update` change with `changed_fields: ["external_ids"]`. Id held by an active programme (or another id already linked): 409 `already_linked` (`details.event_id`); missing/deleted programme or non-active masjid: 404.
+4. **Masjid DELETE cascades.** In one batch: the masjid (`status: deleted`) and every non-deleted programme (`status: deleted`, version +1, one `event` `delete` change each, `masjid_id` set). Response is still the masjid. More than **200** non-deleted programmes: 422 `validation_failed` with `details.reason: "too_many_events"` (and `max_events: 200`), nothing deleted. A programme created after the handler's listing aborts the batch: 409 `version_conflict` (retry).
+5. **Relink after delete.** Deleted masjids/programmes keep their external ids. POST `external_id` or PUT link whose `(app_id, external_id)` is held by a **deleted** masjid/programme moves the link in one batch: the tombstone gets version +1 and an `update` change (`changed_fields: ["external_ids"]`, `origin_app` = the caller) and loses the id; the target gets it (change rows in that order). Held by an active or merged one: 409 `already_linked`. `GET .../by-external/...` returns the holder whatever its status (masjid: a merged holder is followed to its survivor with 200; a deleted one is the tombstone).
+6. **Matching.** Normalisation expands kg/kpg, tmn, jln, bdr, bt, seri->sri, sg, bkt, tg; leading words now include mosque, musholla, mushola, langgar; both article forms (`alhidayah`, `hidayah`) are compared, max taken. A differing number token (digits, roman ii-ix) or single-letter token between the two names caps name similarity at 0.8 (also when only one name has one). `GET /masjids/match` accepts optional `type_id`; every candidate (in `/masjids/match` and in `details.candidates` of `possible_duplicate`) has `same_type`: `true`/`false` when `type_id` was given, **`null` when it was not** (contract says boolean: I chose null over a misleading false). **POST gate** now fires only for score >= 0.9, distance <= 50 m **and** same `type_id`.
+7. **Timestamps** (`start_at`, `end_at`, `from`, `to`, `updated_since`): RFC 3339 with `Z` or an offset (`+08:00`); stored/returned as UTC `Z`, second precision. Invalid (bad date, hour > 23, offset > 23:59, no zone) 422. In a query string an unescaped `+` arrives as a space and is read as `+`.
+8. **Low.** HEAD needs the `read` scope like GET (403 otherwise). `timezone` is canonicalised (`asia/kuala_lumpur` -> `Asia/Kuala_Lumpur`). `/masjids/nearby` cursor is now keyset on `(distance, id)` (opaque; a cursor from the previous offset format is 422); stable under inserts. PATCH `changed_fields` includes `geohash` when the geohash changed (lat/lng edits). PUT/PATCH/DELETE on a merged masjid: 404 with `details.merged_into` (deleted or missing: 404 without details).
+
+Internal: `WriteSpec` gained `preGuards`, `onPreconditionLost`, `respond`; `commitWrite` accepts a spec array; `runCommit*` results carry `reason: 'version' | 'precondition'`; `src/lib/specs.ts` holds link/tombstone/delete spec builders. Events list active-masjid filter is a correlated EXISTS; `hydrateMasjids` groups children with a Map.
+
+New match scores (distance in brackets, score = 0.7 sim + 0.3 dist):
+| Pair | sim | score |
+|---|---|---|
+| Surau Al-Ikhlas / Masjid Al-Ikhlas (30 m) | 1.000 | 0.982 (gate skipped: different type) |
+| Surau Al-Hidayah Blok A / Blok B (40 m) | 0.800 | 0.836 |
+| Surau Taman Desa Fasa 1 / Fasa 2 (40 m) | 0.800 | 0.836 |
+| Kg Baru / Kampung Baru (40 m) | 1.000 | 0.976 |
+| Tmn Melati / Taman Melati (40 m) | 1.000 | 0.976 |
+| Taman Melati / Taman Melawati (40 m) | 0.971 | 0.956 (still >= 0.9: a person confirms with force) |
+| MASJID JAMEK SULTAN ABDUL SAMAD / Masjid Jamek Kuala Lumpur (40 m) | 0.829 | 0.857 (review band) |
+| MASJID AL-HIDAYAH / Masjid Al Hidayah (20 m) | 1.000 | 0.988 |
+| Surau Al-Ikhlas / Surau An-Nur (30 m) | 0.442 | 0.591 |

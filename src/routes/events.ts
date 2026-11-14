@@ -5,13 +5,16 @@ import { EVENT_COLUMNS, hydrateEvents, loadEvent, type EventEntity } from '../li
 import {
   beginWrite, commitWrite, replayOnConflict, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec,
 } from '../lib/write'
+import {
+  activeMasjidGuard, eventDeleteSpec, findHolder, lostActiveMasjid, masjidNotActive, tombstoneUnlinkSpec,
+} from '../lib/specs'
 import { isoNow } from '../lib/time'
 import { DEFAULT_TIMEZONE, EVENT_CATEGORIES, EVENT_WRITABLE_STATUSES } from '../lib/constants'
-import { decodeCursor, encodeCursor, intParam, invalid, normaliseInstant } from '../lib/page'
+import { decodeCursor, encodeCursor, intParam, invalid, normaliseInstant, validateExternalId } from '../lib/page'
 
 export const eventsRouter = new Hono<AppEnv>()
 
-eventsRouter.use('*', async (c, next) => (c.req.method === 'GET' ? requireScope('read')(c, next) : next()))
+eventsRouter.use('*', async (c, next) => (c.req.method === 'GET' || c.req.method === 'HEAD' ? requireScope('read')(c, next) : next()))
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 100
@@ -33,12 +36,12 @@ type EventFields = Partial<Pick<EventEntity,
   'title' | 'description' | 'category' | 'speaker' | 'start_at' | 'end_at' | 'timezone' | 'rrule' | 'status' |
   'poster_url' | 'registration_url'>>
 
-function validTimezone(tz: string): boolean {
+/** The canonical IANA name for a time zone ("asia/kuala_lumpur" gives "Asia/Kuala_Lumpur"), or null when unknown. */
+function canonicalTimezone(tz: string): string | null {
   try {
-    new Intl.DateTimeFormat('en', { timeZone: tz })
-    return true
+    return new Intl.DateTimeFormat(undefined, { timeZone: tz }).resolvedOptions().timeZone
   } catch {
-    return false
+    return null
   }
 }
 
@@ -75,20 +78,23 @@ function validateFields(body: Record<string, unknown>): EventFields {
         break
       case 'start_at': {
         const t = normaliseInstant(v)
-        if (!t) invalid('start_at must be an ISO 8601 UTC time ending in Z', key)
+        if (!t) invalid('start_at must be an RFC 3339 timestamp (e.g. 2026-11-14T10:00:00Z or with an offset such as +08:00)', key)
         out.start_at = t
         break
       }
       case 'end_at': {
         if (v === null) { out.end_at = null; break }
         const t = normaliseInstant(v)
-        if (!t) invalid('end_at must be an ISO 8601 UTC time ending in Z, or null', key)
+        if (!t) invalid('end_at must be an RFC 3339 timestamp (e.g. 2026-11-14T10:00:00Z or with an offset such as +08:00), or null', key)
         out.end_at = t
         break
       }
       case 'timezone':
-        if (typeof v !== 'string' || !validTimezone(v)) invalid('timezone must be an IANA time zone name, e.g. Asia/Kuala_Lumpur', key)
-        out.timezone = v
+        {
+          const tz = typeof v === 'string' ? canonicalTimezone(v) : null
+          if (tz === null) invalid('timezone must be an IANA time zone name, e.g. Asia/Kuala_Lumpur', key)
+          out.timezone = tz
+        }
         break
       case 'rrule':
         // eslint-disable-next-line no-control-regex
@@ -145,14 +151,14 @@ async function listEvents(
   const fromRaw = c.req.query('from')
   const toRaw = c.req.query('to')
   const from = fromRaw === undefined || fromRaw === '' ? isoNow() : normaliseInstant(fromRaw)
-  if (!from) invalid('from must be an ISO 8601 UTC time ending in Z', 'from')
+  if (!from) invalid('from must be an RFC 3339 timestamp (e.g. 2026-11-14T10:00:00Z or with an offset such as +08:00)', 'from')
   const to = toRaw === undefined || toRaw === '' ? isoNow(new Date(Date.now() + DEFAULT_WINDOW_MS)) : normaliseInstant(toRaw)
-  if (!to) invalid('to must be an ISO 8601 UTC time ending in Z', 'to')
+  if (!to) invalid('to must be an RFC 3339 timestamp (e.g. 2026-11-14T10:00:00Z or with an offset such as +08:00)', 'to')
   const limit = intParam(c.req.query('limit'), 'limit', DEFAULT_LIMIT, 1, MAX_LIMIT)
 
   const conds = [
     'masjid_id IN (SELECT value FROM json_each(?))',
-    "masjid_id IN (SELECT id FROM masjids WHERE status = 'active')",
+    "EXISTS (SELECT 1 FROM masjids m WHERE m.id = masjid_events.masjid_id AND m.status = 'active')",
     "status IN ('active', 'cancelled')",
     '(rrule IS NOT NULL OR COALESCE(end_at, start_at) >= ?)',
     'start_at < ?',
@@ -217,6 +223,7 @@ eventsRouter.patch('/:id', async (c) => {
     const body = parseJsonObject(ctx)
     const before = await loadEvent(ctx.db, id)
     if (!before || before.status === 'deleted') throw new ApiError(404, 'not_found', 'Programme not found')
+    await requireActiveMasjid(ctx.db, before.masjid_id)
 
     const f = validateFields(body)
     if (Object.keys(f).length === 0) invalid('No patchable fields provided', 'body')
@@ -245,6 +252,8 @@ eventsRouter.patch('/:id', async (c) => {
         .prepare(`UPDATE masjid_events SET ${sets.join(', ')} WHERE id = ? AND version = ?`)
         .bind(...binds, id, before.version),
       loadCurrent: () => loadEvent(ctx.db, id),
+      preGuards: [activeMasjidGuard(before.masjid_id)],
+      onPreconditionLost: lostActiveMasjid(ctx.db, before.masjid_id),
       status: 200,
     })
   })
@@ -261,28 +270,99 @@ eventsRouter.delete('/:id', async (c) => {
     if (!before || before.status === 'deleted') throw new ApiError(404, 'not_found', 'Programme not found')
     if (before.version !== ctx.ifMatch) throw versionConflict(before)
 
-    const now = isoNow()
-    const after: EventEntity = { ...before, status: 'deleted', version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
+    await requireActiveMasjid(ctx.db, before.masjid_id)
+
     return commitWrite(c, ctx, {
-      entity: 'event',
-      op: 'delete',
-      entityId: id,
-      baseVersion: before.version,
-      masjidId: before.masjid_id,
-      changedFields: ['status'],
-      before,
-      after,
-      entityStatement: ctx.db
-        .prepare(
-          `UPDATE masjid_events SET status = 'deleted', version = version + 1, updated_by_app = ?, updated_at = ?
-           WHERE id = ? AND version = ?`,
-        )
-        .bind(ctx.originApp, now, id, before.version),
-      loadCurrent: () => loadEvent(ctx.db, id),
-      status: 200,
+      ...eventDeleteSpec(ctx, before, isoNow()),
+      preGuards: [activeMasjidGuard(before.masjid_id)],
+      onPreconditionLost: lostActiveMasjid(ctx.db, before.masjid_id),
     })
   })
 })
+
+// Link: PUT /events/:id/external-ids/:app_id  { "external_id": "..." }. Same rules as the masjid link.
+eventsRouter.put('/:id/external-ids/:app_id', async (c) => {
+  const id = parseId(c.req.param('id'))
+  const appId = c.req.param('app_id')
+  if (appId !== c.get('key').app_id) {
+    throw new ApiError(403, 'forbidden', 'You can only link your own app_id', { app_id: appId })
+  }
+  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    const externalId = validateExternalId(body.external_id)
+
+    for (let attempt = 0; ; attempt++) {
+      const before = await loadEvent(ctx.db, id)
+      if (!before || before.status === 'deleted') throw new ApiError(404, 'not_found', 'Programme not found')
+      await requireActiveMasjid(ctx.db, before.masjid_id)
+
+      const mine = before.external_ids.filter(e => e.app_id === appId)
+      if (mine.some(e => e.external_id === externalId)) return c.json(before, 200) // already linked: no-op
+      if (mine.length > 0) throw alreadyLinked(id, appId, mine[0].external_id)
+
+      const owner = await findHolder(ctx.db, 'event', appId, externalId)
+      if (owner && owner.status !== 'deleted') throw alreadyLinked(owner.id, appId, externalId)
+
+      const now = isoNow()
+      const after: EventEntity = {
+        ...before,
+        external_ids: [...before.external_ids, { app_id: appId, external_id: externalId }]
+          .sort((a, b) => (a.app_id + '\0' + a.external_id < b.app_id + '\0' + b.external_id ? -1 : 1)),
+        version: before.version + 1,
+        updated_by_app: ctx.originApp,
+        updated_at: now,
+      }
+      try {
+        const unlink = owner ? [await tombstoneUnlinkSpec(ctx, 'event', owner.id, appId, externalId, now)] : []
+        return await commitWrite(c, ctx, [...unlink, {
+          entity: 'event',
+          op: 'update',
+          respond: true,
+          entityId: id,
+          baseVersion: before.version,
+          masjidId: before.masjid_id,
+          changedFields: ['external_ids'],
+          before,
+          after,
+          entityStatement: ctx.db
+            .prepare('UPDATE masjid_events SET version = version + 1, updated_by_app = ?, updated_at = ? WHERE id = ? AND version = ?')
+            .bind(ctx.originApp, now, id, before.version),
+          loadCurrent: () => loadEvent(ctx.db, id),
+          preGuards: [activeMasjidGuard(before.masjid_id)],
+          onPreconditionLost: lostActiveMasjid(ctx.db, before.masjid_id),
+          children: (b) => [
+            b.stmt(
+              'INSERT INTO event_external_ids (app_id, external_id, event_id, created_at) VALUES (?, ?, {{ID}}, ?)',
+              [appId, externalId, now],
+            ),
+          ],
+          status: 200,
+        }])
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'version_conflict' && attempt < 3) continue
+        if (isExternalIdCollision(err)) {
+          const cur = await loadEvent(ctx.db, id)
+          if (cur?.external_ids.some(e => e.app_id === appId && e.external_id === externalId)) return c.json(cur, 200)
+          const owner2 = await findHolder(ctx.db, 'event', appId, externalId)
+          throw alreadyLinked(owner2?.id ?? 0, appId, externalId)
+        }
+        throw err
+      }
+    }
+  })
+})
+
+async function requireActiveMasjid(db: D1Database, masjidId: number): Promise<void> {
+  const m = await db
+    .prepare('SELECT status, merged_into FROM masjids WHERE id = ?')
+    .bind(masjidId)
+    .first<{ status: string; merged_into: number | null }>()
+  if (!m || m.status !== 'active') throw masjidNotActive(m, 'Masjid')
+}
 
 /** `GET|POST /masjids/:id/events`, mounted on the masjids router. */
 export function registerMasjidEventRoutes(router: Hono<AppEnv>): void {
@@ -309,10 +389,7 @@ export function registerMasjidEventRoutes(router: Hono<AppEnv>): void {
         .prepare('SELECT status, merged_into FROM masjids WHERE id = ?')
         .bind(masjidId)
         .first<{ status: string; merged_into: number | null }>()
-      if (!masjid || masjid.status !== 'active') {
-        throw new ApiError(404, 'not_found', 'Masjid not found or not active',
-          masjid?.merged_into ? { merged_into: masjid.merged_into } : undefined)
-      }
+      if (!masjid || masjid.status !== 'active') throw masjidNotActive(masjid)
 
       for (const field of ['title', 'start_at'] as const) {
         if (body[field] === undefined || body[field] === null || body[field] === '') invalid(`Missing required field: ${field}`, field)
@@ -328,11 +405,9 @@ export function registerMasjidEventRoutes(router: Hono<AppEnv>): void {
           invalid('external_id must be a non-empty string of at most 255 characters', 'external_id')
         }
         externalId = v.trim()
-        const linked = await ctx.db
-          .prepare('SELECT event_id FROM event_external_ids WHERE app_id = ? AND external_id = ?')
-          .bind(ctx.originApp, externalId)
-          .first<{ event_id: number }>()
-        if (linked) throw alreadyLinked(linked.event_id, ctx.originApp, externalId)
+        // Held by a non-deleted programme: 409. Held by a deleted one: the link moves (see the commit below).
+        const holder = await findHolder(ctx.db, 'event', ctx.originApp, externalId)
+        if (holder && holder.status !== 'deleted') throw alreadyLinked(holder.id, ctx.originApp, externalId)
       }
 
       const now = isoNow()
@@ -387,19 +462,29 @@ export function registerMasjidEventRoutes(router: Hono<AppEnv>): void {
             [ctx.originApp, externalId, now],
           ),
         ],
+        preGuards: [activeMasjidGuard(masjidId)],
+        onPreconditionLost: lostActiveMasjid(ctx.db, masjidId),
+        respond: true,
         status: 201,
       }
-      try {
-        return await commitWrite(c, ctx, spec)
-      } catch (err) {
-        if (externalId !== null && isExternalIdCollision(err)) {
-          const linked = await ctx.db
-            .prepare('SELECT event_id FROM event_external_ids WHERE app_id = ? AND external_id = ?')
-            .bind(ctx.originApp, externalId)
-            .first<{ event_id: number }>()
-          throw alreadyLinked(linked?.event_id ?? 0, ctx.originApp, externalId)
+      for (let attempt = 0; ; attempt++) {
+        const specs: WriteSpec[] = []
+        if (externalId !== null) {
+          const holder = await findHolder(ctx.db, 'event', ctx.originApp, externalId)
+          if (holder && holder.status !== 'deleted') throw alreadyLinked(holder.id, ctx.originApp, externalId)
+          if (holder) specs.push(await tombstoneUnlinkSpec(ctx, 'event', holder.id, ctx.originApp, externalId, now))
         }
-        throw err
+        specs.push(spec)
+        try {
+          return await commitWrite(c, ctx, specs)
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'version_conflict' && attempt < 3) continue
+          if (externalId !== null && isExternalIdCollision(err)) {
+            const linked = await findHolder(ctx.db, 'event', ctx.originApp, externalId)
+            throw alreadyLinked(linked?.id ?? 0, ctx.originApp, externalId)
+          }
+          throw err
+        }
       }
     })
   })

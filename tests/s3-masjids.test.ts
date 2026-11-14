@@ -283,7 +283,7 @@ describe('PATCH partial contacts and facilities', () => {
     expect(v2).toMatchObject({ telephone: '+60312345678', lat: 1.5, lng: 103.9 })
     expect(v2.geohash).not.toBe(m.geohash)
     const rows = await changesOf(m.id)
-    expect(JSON.parse(rows[rows.length - 1].changed_fields)).toEqual(['contacts', 'geohash', 'lat', 'lng', 'telephone'].filter(f => f !== 'geohash'))
+    expect(JSON.parse(rows[rows.length - 1].changed_fields)).toEqual(['contacts', 'geohash', 'lat', 'lng', 'telephone'])
   })
 })
 
