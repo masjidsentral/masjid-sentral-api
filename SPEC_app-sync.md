@@ -74,7 +74,7 @@ New shapes (add `NOT NULL` and `CHECK` constraints as the contract implies):
 `src/lib/write.ts` exposes one function that every mutating handler goes through:
 
 1. **Idempotency.** Look up `(key.id, Idempotency-Key)`. Missing header → 422. Found with the same `request_hash` (SHA-256 of method + path + body) → replay the stored response. Found with a different hash → 409 `idempotency_mismatch`.
-2. **Version check.** PATCH and DELETE require `If-Match`. Missing → 428 (code `validation_failed`). Mismatch → 409 `version_conflict` with `details.current` set to the full current entity.
+2. **Version check.** PATCH and DELETE require `If-Match`. Missing → 422 `validation_failed` (`details.header: "If-Match"`). Mismatch → 409 `version_conflict` with `details.current` set to the full current entity.
 3. **Atomic commit.** One `DB.batch([...])` must hold: the entity write (`UPDATE … SET …, version = version + 1, updated_by_app = ?, updated_at = ? WHERE id = ? AND version = ?`), the child-row writes, the `changes` insert, and the idempotency insert. If the guarded UPDATE matched 0 rows (a concurrent write won), nothing else may persist. One way: write the follow-up inserts as `INSERT … SELECT … WHERE changes() = 1` straight after the guarded UPDATE, then check `meta.changes` and return 409 if it is 0. Prove this with a test that races two PATCHes from the same base version.
 4. `changes.after_json` is the full entity exactly as `GET` returns it (contract §4). `before_json` is the previous full entity (null on create).
 5. **After commit:** upsert `webhook_deliveries` (pending, `latest_seq` = new seq) for every active subscription whose key `app_id` ≠ the writer's `app_id`. Then `c.executionCtx.waitUntil(dispatch())`.
@@ -121,7 +121,7 @@ All routes under `/admin/*` require the `admin` scope. Admin writes use the writ
    - A daily cron at `0 19 * * *` (03:00 MYT) scans masjids changed since the last scan (keep the cursor in a one-row `scan_state` table). Pairs with `score ≥ 0.8` and `distance_m ≤ 150` go in as pending.
    - Keep each run under 1,000 masjids and continue on the next run.
    - Endpoints: `GET /admin/duplicates?status=pending`, `POST /admin/duplicates/:id/dismiss`, and `POST /admin/duplicates/:id/merge { into }` (calls the merge above and marks the row merged).
-4. **Key issue script** `api/scripts/issue-key.mjs <app_id> <scopes>`: prints a random 32-byte token (`ms_live_…`) and the `INSERT INTO api_keys` SQL with its SHA-256 hash. It never writes anywhere itself. The owner runs the SQL.
+4. **Key issue script** (moved forward: built in the S1 fixes) `api/scripts/issue-key.mjs <app_id> <scopes>`: prints a random 32-byte token (`ms_live_…`) and the `INSERT INTO api_keys` SQL with its SHA-256 hash. It never writes anywhere itself. The owner runs the SQL.
 5. **`openapi.json`** brought to v1.1 to match the contract. `openapi.test.ts` checks that every route in `src/routes` appears in it.
 
 ## 6. Tests (minimum; add more as needed)
@@ -142,6 +142,7 @@ Every contract §10 check that the server can show, plus:
 
 ## 8. Owner tasks after review (not for agents)
 
-1. Bookmark the Sentral D1 (Time Travel), then apply 003–005 remotely.
-2. Deploy the Worker. Issue keys for `qiyam` and `jejak_masjid` (and an admin key) with `scripts/issue-key.mjs`. Register both webhooks.
+0. **Ship S1–S4 together, never S1 alone.** S1 makes every read need a key, and S2's 004 empties the data, so a partial deploy breaks any current reader.
+1. Before migrating, check the remote `d1_migrations` table and that `api_keys` exists (if 001/002 were applied by hand, wrangler will try to re-run them; record them in `d1_migrations` first). Bookmark the Sentral D1 (Time Travel), then apply 003–005 remotely, **then** deploy (the new auth reads 003's columns; Worker-before-migration = every request 500).
+2. Insert the real keys **before** the deploy (003 deletes the dev key; any old key becomes read-only with no app). Then deploy the Worker. Issue keys for `qiyam` and `jejak_masjid` (and an admin key) with `scripts/issue-key.mjs`. Register both webhooks.
 3. Give Qiyam the staging/prod URL and key. Qiyam's link job runs first; JM's after.
