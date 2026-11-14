@@ -8,7 +8,7 @@ import { geohashPrefixes, haversineKm } from '../lib/geo'
 import type { AppEnv } from '../middleware/auth'
 import { ApiError, errorBody } from '../lib/errors'
 import { loadMasjid, normaliseImages, type MasjidEntity } from '../lib/entities'
-import { beginWrite, commitWrite, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec } from '../lib/write'
+import { beginWrite, commitWrite, replayOnConflict, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec } from '../lib/write'
 import { isoNow } from '../lib/time'
 
 export const masjidsRouter = new Hono<AppEnv>()
@@ -247,7 +247,7 @@ function imageStatements(images: MasjidEntity['images'], now: string) {
   return (b: Parameters<NonNullable<WriteSpec['children']>>[0]) =>
     images.map(img =>
       b.stmt(
-        'INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) SELECT {{ID}}, ?, ?, ?, ? WHERE {{G}}',
+        'INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) VALUES ({{ID}}, ?, ?, ?, ?)',
         [img.url, img.is_thumbnail ? 1 : 0, img.sort_order, now],
       ),
     )
@@ -332,59 +332,61 @@ masjidsRouter.patch('/:id', async (c) => {
   if ('replay' in begin) return begin.replay
   const ctx: WriteCtx = begin.ctx
 
-  const body = parseJsonObject(ctx)
-  const before = await loadMasjid(ctx.db, id)
-  if (!before || before.status !== 'active') throw new ApiError(404, 'not_found', 'Masjid not found')
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    const before = await loadMasjid(ctx.db, id)
+    if (!before || before.status !== 'active') throw new ApiError(404, 'not_found', 'Masjid not found')
 
-  if (('lat' in body) !== ('lng' in body)) fail('lat and lng must both be provided together', 'lat')
-  const s = validateScalars(body)
-  const images = 'images' in body ? validateImages(body.images) : undefined
-  if (Object.keys(s).length === 0 && images === undefined) fail('No patchable fields provided', 'body')
-  await checkReferences(ctx.db, s)
+    if (('lat' in body) !== ('lng' in body)) fail('lat and lng must both be provided together', 'lat')
+    const s = validateScalars(body)
+    const images = 'images' in body ? validateImages(body.images) : undefined
+    if (Object.keys(s).length === 0 && images === undefined) fail('No patchable fields provided', 'body')
+    await checkReferences(ctx.db, s)
 
-  if (before.version !== ctx.ifMatch) throw versionConflict(before)
+    if (before.version !== ctx.ifMatch) throw versionConflict(before)
 
-  const now = isoNow()
-  const after: MasjidEntity = { ...before, ...s, version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
-  if (images !== undefined) after.images = images
-  if (s.lat !== undefined && s.lng !== undefined) after.geohash = ngeohash.encode(s.lat, s.lng, 9)
+    const now = isoNow()
+    const after: MasjidEntity = { ...before, ...s, version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
+    if (images !== undefined) after.images = images
+    if (s.lat !== undefined && s.lng !== undefined) after.geohash = ngeohash.encode(s.lat, s.lng, 9)
 
-  const changedFields: string[] = []
-  for (const key of Object.keys(s) as Array<keyof Scalars>) {
-    if (before[key] !== after[key]) changedFields.push(key)
-  }
-  if (images !== undefined && JSON.stringify(images) !== JSON.stringify(before.images)) changedFields.push('images')
-  changedFields.sort()
+    const changedFields: string[] = []
+    for (const key of Object.keys(s) as Array<keyof Scalars>) {
+      if (before[key] !== after[key]) changedFields.push(key)
+    }
+    if (images !== undefined && JSON.stringify(images) !== JSON.stringify(before.images)) changedFields.push('images')
+    changedFields.sort()
 
-  const sets: string[] = []
-  const binds: unknown[] = []
-  for (const key of Object.keys(s) as Array<keyof Scalars>) {
-    sets.push(`${key} = ?`)
-    binds.push(key === 'jumaat_available' ? (after.jumaat_available ? 1 : 0) : after[key])
-  }
-  if (s.lat !== undefined) { sets.push('geohash = ?'); binds.push(after.geohash) }
-  sets.push('version = version + 1', 'updated_by_app = ?', 'updated_at = ?')
-  binds.push(ctx.originApp, now)
+    const sets: string[] = []
+    const binds: unknown[] = []
+    for (const key of Object.keys(s) as Array<keyof Scalars>) {
+      sets.push(`${key} = ?`)
+      binds.push(key === 'jumaat_available' ? (after.jumaat_available ? 1 : 0) : after[key])
+    }
+    if (s.lat !== undefined) { sets.push('geohash = ?'); binds.push(after.geohash) }
+    sets.push('version = version + 1', 'updated_by_app = ?', 'updated_at = ?')
+    binds.push(ctx.originApp, now)
 
-  const entityStatement = ctx.db
-    .prepare(`UPDATE masjids SET ${sets.join(', ')} WHERE id = ? AND version = ?`)
-    .bind(...binds, id, before.version)
+    const entityStatement = ctx.db
+      .prepare(`UPDATE masjids SET ${sets.join(', ')} WHERE id = ? AND version = ?`)
+      .bind(...binds, id, before.version)
 
-  return commitWrite(c, ctx, {
-    entity: 'masjid',
-    op: 'update',
-    entityId: id,
-    baseVersion: before.version,
-    masjidId: null,
-    changedFields,
-    before,
-    after,
-    entityStatement,
-    loadCurrent: () => loadMasjid(ctx.db, id),
-    children: images === undefined ? undefined : (b) => [
-      b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}} AND {{G}}'),
-      ...imageStatements(images, now)(b),
-    ],
-    status: 200,
+    return commitWrite(c, ctx, {
+      entity: 'masjid',
+      op: 'update',
+      entityId: id,
+      baseVersion: before.version,
+      masjidId: null,
+      changedFields,
+      before,
+      after,
+      entityStatement,
+      loadCurrent: () => loadMasjid(ctx.db, id),
+      children: images === undefined ? undefined : (b) => [
+        b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}}'),
+        ...imageStatements(images, now)(b),
+      ],
+      status: 200,
+    })
   })
 })

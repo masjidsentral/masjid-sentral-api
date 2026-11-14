@@ -4,7 +4,8 @@ import {
   BASE, KEYS, writeHeaders, readHeaders, createMasjid, patchMasjid, getMasjid, MASJID_BODY,
 } from './helpers'
 import { loadMasjid } from '../src/lib/entities'
-import { runCommit, type WriteCtx, type WriteSpec } from '../src/lib/write'
+import { runCommit, runCommitMany, lookupIdempotent, replayOnConflict, versionConflict, type WriteCtx, type WriteSpec } from '../src/lib/write'
+import { ApiError } from '../src/lib/errors'
 import { isoNow } from '../src/lib/time'
 
 // S2: write pipeline (idempotency, versions, atomic commit, change log).
@@ -230,8 +231,8 @@ describe('atomic commit (race)', () => {
           .prepare('UPDATE masjids SET name = ?, version = version + 1, updated_by_app = ?, updated_at = ? WHERE id = ? AND version = ?')
           .bind(name, 'jejak_masjid', now, m.id, before.version),
         children: (b) => [
-          b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}} AND {{G}}'),
-          b.stmt('INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) SELECT {{ID}}, ?, 0, 0, ? WHERE {{G}}', [after.images[0].url, now]),
+          b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}}'),
+          b.stmt('INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) VALUES ({{ID}}, ?, 0, 0, ?)', [after.images[0].url, now]),
         ],
       }
       return { ctx, spec }
@@ -323,3 +324,146 @@ describe('v1.0 handlers on the new schema', () => {
 })
 
 interface MasjidJsonLike { version: number; name: string; telephone: string | null }
+
+// ─── S2 review fixes ─────────────────────────────────────────────────────────
+
+async function mkSpec(m: { id: number; version: number }, name: string, now = isoNow()): Promise<WriteSpec> {
+  const before = (await loadMasjid(env.DB, m.id))!
+  const url = `https://img.example/${name}.jpg`
+  return {
+    entity: 'masjid', op: 'update', entityId: m.id, baseVersion: m.version, masjidId: null,
+    changedFields: ['images', 'name'], before,
+    after: { ...before, name, version: m.version + 1, updated_at: now, images: [{ url, is_thumbnail: false, sort_order: 0 }] },
+    status: 200,
+    entityStatement: env.DB
+      .prepare('UPDATE masjids SET name = ?, version = version + 1, updated_by_app = ?, updated_at = ? WHERE id = ? AND version = ?')
+      .bind(name, 'jejak_masjid', now, m.id, m.version),
+    children: (b) => [
+      b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}}'),
+      b.stmt('INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) VALUES ({{ID}}, ?, 0, 0, ?)', [url, now]),
+    ],
+  }
+}
+
+async function mkCtx(idemKey: string, requestHash: string): Promise<WriteCtx> {
+  return { db: env.DB, keyId: await keyId('jm'), originApp: 'jejak_masjid', actor: 'user-1', idemKey, requestHash, bodyText: '', ifMatch: null }
+}
+
+describe('abort guard (H1)', () => {
+  it('raises inside a D1 batch when the guarded UPDATE matches no row, and rolls the batch back', async () => {
+    const m = await createMasjid()
+    const err = await env.DB.batch([
+      env.DB.prepare("UPDATE masjids SET name = 'GUARD-LEAK' WHERE id = ? AND version = 1").bind(m.id),
+      env.DB.prepare("UPDATE masjids SET name = 'GUARD-LEAK' WHERE id = ? AND version = 999").bind(m.id),
+      env.DB.prepare('INSERT INTO batch_guard (ok) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END'),
+      env.DB.prepare("INSERT INTO changes (entity, entity_id, op, version, origin_app, actor, after_json, occurred_at) VALUES ('masjid', ?, 'update', 77, 'x', 'x', '{}', 'x')").bind(m.id),
+    ]).then(() => null, (e: unknown) => e as Error)
+    expect(err).not.toBeNull()
+    expect(String(err!.message)).toContain('version_guard')
+    expect((await getMasjid(m.id)).name).toBe(MASJID_BODY.name) // first UPDATE rolled back too
+    expect((await changeRows(m.id)).filter(r => r.version === 77)).toHaveLength(0)
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM batch_guard').first<{ n: number }>())!.n).toBe(0)
+  })
+
+  it('shared Idempotency-Key, loser has a stale version and targets a DIFFERENT masjid: loser writes nothing', async () => {
+    const x = await createMasjid({ name: 'Shared X' })
+    const y = await createMasjid({ name: 'Shared Y', images: [{ url: 'https://img.example/y-base.jpg' }] })
+    const key = `shared-${crypto.randomUUID()}`
+    const jm = await keyId('jm')
+
+    // Make y's base version stale: someone bumps it after the loser read it.
+    const staleY = { id: y.id, version: y.version }
+    const bump = await patchMasjid(y.id, y.version, { description: 'bumped' })
+    expect(bump.status).toBe(200)
+    const yAfterBump = await getMasjid(y.id)
+
+    const sub = await env.DB.prepare("INSERT INTO webhook_subscriptions (api_key_id, url, secret) VALUES (?, 'https://hooks.example/h1', 's') RETURNING id")
+      .bind(await keyId('webhook')).first<{ id: number }>()
+    await env.DB.prepare('DELETE FROM webhook_deliveries').run()
+
+    const a = await runCommit(await mkCtx(key, 'hash-A'), await mkSpec(x, 'WinnerX'))
+    expect(a.ok).toBe(true)
+    await env.DB.prepare('DELETE FROM webhook_deliveries').run()
+    const changesBefore = (await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>())!.n
+
+    const ctxB = await mkCtx(key, 'hash-B')
+    const b = await runCommit(ctxB, await mkSpec(staleY, 'LoserY'))
+    expect(b.ok).toBe(false)
+
+    // Nothing from B: no children on Y, no version bump, no change row, no delivery.
+    const yNow = await getMasjid(y.id)
+    expect(yNow).toEqual(yAfterBump)
+    expect(yNow.images.map(i => i.url)).toEqual(['https://img.example/y-base.jpg'])
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>())!.n).toBe(changesBefore)
+    expect(await env.DB.prepare('SELECT * FROM webhook_deliveries WHERE subscription_id = ?').bind(sub!.id).first()).toBeNull()
+    expect((await idemRow(jm, key))!.request_hash).toBe('hash-A')
+
+    // The response: B's request differs from A's (other path/body), so M1's re-check answers 409
+    // idempotency_mismatch (the key belongs to A's request); a same-request retry would be replayed instead.
+    await expect(lookupIdempotent(ctxB)).rejects.toMatchObject({ status: 409, code: 'idempotency_mismatch' })
+    const replay = await lookupIdempotent(await mkCtx(key, 'hash-A'))
+    expect(replay?.headers.get('Idempotent-Replay')).toBe('true')
+    await env.DB.prepare('DELETE FROM webhook_subscriptions WHERE id = ?').bind(sub!.id).run()
+  })
+})
+
+describe('multi-entity commit (M3)', () => {
+  it('commits two entities with one idempotency row, two change rows and one enqueue', async () => {
+    const m1 = await createMasjid({ name: 'Multi 1' })
+    const m2 = await createMasjid({ name: 'Multi 2' })
+    const key = `multi-${crypto.randomUUID()}`
+    const ctx = await mkCtx(key, 'h-multi')
+    const r = await runCommitMany(ctx, [await mkSpec(m1, 'Multi1b'), await mkSpec(m2, 'Multi2b')])
+    expect(r.ok).toBe(true)
+    expect((await getMasjid(m1.id)).name).toBe('Multi1b')
+    expect((await getMasjid(m2.id)).images.map(i => i.url)).toEqual(['https://img.example/Multi2b.jpg'])
+    expect((await changeRows(m1.id)).filter(x => x.version === 2)).toHaveLength(1)
+    expect((await changeRows(m2.id)).filter(x => x.version === 2)).toHaveLength(1)
+    const rows = await env.DB.prepare('SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = ?').bind(key).first<{ n: number }>()
+    expect(rows!.n).toBe(1)
+  })
+
+  it('the second guard losing rolls back the first entity too', async () => {
+    const m1 = await createMasjid({ name: 'Multi A' })
+    const m2 = await createMasjid({ name: 'Multi B' })
+    await patchMasjid(m2.id, m2.version, { description: 'bump' })
+    const key = `multi-lose-${crypto.randomUUID()}`
+    const changesBefore = (await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>())!.n
+    const r = await runCommitMany(await mkCtx(key, 'h'), [await mkSpec(m1, 'NeverA'), await mkSpec({ id: m2.id, version: m2.version }, 'NeverB')])
+    expect(r.ok).toBe(false)
+    expect((await getMasjid(m1.id)).name).toBe('Multi A')
+    expect((await getMasjid(m1.id)).version).toBe(1)
+    expect((await getMasjid(m1.id)).images).toEqual([])
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>())!.n).toBe(changesBefore)
+    expect(await idemRow(await keyId('jm'), key)).toBeNull()
+  })
+})
+
+describe('racing retry replays (M1)', () => {
+  it('replayOnConflict returns the stored response when the key appeared before a 404/409', async () => {
+    const m = await createMasjid()
+    const key = `m1-${crypto.randomUUID()}`
+    const ctx = await mkCtx(key, 'same-hash')
+    await env.DB.prepare(
+      `INSERT INTO idempotency_keys (api_key_id, key, request_hash, response_status, response_json, created_at) VALUES (?, ?, 'same-hash', 200, '{"id":1,"version":2}', ?)`,
+    ).bind(ctx.keyId, key, isoNow()).run()
+    const r409 = await replayOnConflict(ctx, async () => { throw versionConflict({ id: m.id }) })
+    expect(r409.status).toBe(200)
+    expect(r409.headers.get('Idempotent-Replay')).toBe('true')
+    const r404 = await replayOnConflict(ctx, async () => { throw new ApiError(404, 'not_found', 'x') })
+    expect(r404.headers.get('Idempotent-Replay')).toBe('true')
+    // No stored row: the original error stands.
+    await expect(replayOnConflict(await mkCtx(`free-${crypto.randomUUID()}`, 'h'), async () => { throw versionConflict(null) }))
+      .rejects.toMatchObject({ status: 409, code: 'version_conflict' })
+  })
+
+  it('end to end: a retried PATCH after the first attempt committed is replayed, not 409', async () => {
+    const m = await createMasjid()
+    const key = `m1-e2e-${crypto.randomUUID()}`
+    const first = await patchMasjid(m.id, m.version, { name: 'M1 e2e' }, { idemKey: key })
+    expect(first.status).toBe(200)
+    const retry = await patchMasjid(m.id, m.version, { name: 'M1 e2e' }, { idemKey: key })
+    expect(retry.status).toBe(200)
+    expect(retry.headers.get('Idempotent-Replay')).toBe('true')
+  })
+})

@@ -1,15 +1,15 @@
 // Write pipeline (spec 3.2): every mutating handler goes through beginWrite() then commitWrite().
 //
-// Atomicity: one D1 batch() holds the entity write, the change-log row, the idempotency row,
+// Atomicity: one D1 batch() holds the entity write(s), the change-log row(s), the idempotency row,
 // the child-row writes and the webhook enqueue. D1 runs a batch as a single SQLite transaction on one
-// connection, statement by statement, with no interleaving writes. The guarded UPDATE
-// (`WHERE id = ? AND version = ?`) is the only statement that can lose a race. Everything after it is
-// chained to it:
-//   1. changes row:      INSERT ... SELECT ... WHERE changes() = 1   (changes() = rows of the UPDATE)
-//   2. idempotency row:  INSERT ... SELECT ... WHERE changes() = 1   (changes() = the changes row, 1)
-//   3. child rows, webhook enqueue: guarded by EXISTS(the idempotency row of this request)
-// A loser therefore writes nothing, and its idempotency row is never stored. We do not rely on
-// changes() across statements that can legitimately affect 0 rows: step 3 uses the idempotency row.
+// connection, statement by statement, with no interleaving writes, and rolls the whole batch back when any
+// statement fails. The guarded UPDATE (`WHERE id = ? AND version = ?`) is the only statement that can lose a
+// race, so right after it comes an ABORT GUARD:
+//   INSERT INTO batch_guard (ok) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END   (changes() = the UPDATE's rows)
+// batch_guard has CHECK (ok = 1) (constraint name version_guard): a lost guard raises, the batch rolls back, and
+// nothing (children, change rows, idempotency row, webhook ping) persists. Everything after the guard therefore
+// needs no condition of its own. The guard row is deleted again right away.
+// A raised guard maps to the 409 path (`isVersionGuardError`).
 
 import type { Context } from 'hono'
 import { ApiError } from './errors'
@@ -39,10 +39,9 @@ export interface WriteCtx {
 
 export interface ChildBuilder {
   /**
-   * Builds a statement that only takes effect when this write won. The template must end with `{{G}}`
-   * (the guard expression, e.g. `INSERT INTO t (a) SELECT ? WHERE {{G}}` or `DELETE FROM t WHERE x = ? AND {{G}}`).
-   * `{{ID}}` expands to the entity id (a literal on update, a sub-select on create). Binds cover only the
-   * template's own `?` placeholders, in order, excluding the guard's.
+   * Builds a child statement. It runs only if the entity's version guard won (a lost guard aborts the whole
+   * batch before it). `{{ID}}` expands to the entity id (a literal on update, a sub-select on create). Binds
+   * are the template's own `?` placeholders, in order.
    */
   stmt(template: string, binds?: unknown[]): D1PreparedStatement
 }
@@ -73,6 +72,10 @@ export interface WriteSpec {
 
 export type CommitResult =
   | { ok: true; seq: number; entity: { id: number; version: number }; status: number }
+  | { ok: false }
+
+export type CommitManyResult =
+  | { ok: true; results: Array<{ seq: number; entity: { id: number; version: number } }>; status: number }
   | { ok: false }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -176,91 +179,149 @@ export function parseJsonObject(ctx: Pick<WriteCtx, 'bodyText'>): Record<string,
 
 // ─── commit ──────────────────────────────────────────────────────────────────
 
-export function buildCommitStatements(ctx: WriteCtx, spec: WriteSpec, now: string): D1PreparedStatement[] {
+/** True when a batch error is the abort guard firing (a lost version race). */
+export function isVersionGuardError(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 4; depth++) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('version_guard')) return true
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
+/** Builds the batch for one or more entity writes (one idempotency row for the request, one enqueue). */
+export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: string): { stmts: D1PreparedStatement[]; entityIdx: number[] } {
   const { db } = ctx
-  const isCreate = spec.op === 'create'
-  const origin = spec.originApp ?? ctx.originApp
-  const afterJson = JSON.stringify(spec.after)
-  const beforeJson = spec.before === null ? null : JSON.stringify(spec.before)
-  const fieldsJson = JSON.stringify(spec.changedFields)
-  const status = spec.status
-
-  // Entity id and masjid id as SQL: create takes them from the row just inserted.
-  const entityIdSql = isCreate ? 'last_insert_rowid()' : String(spec.entityId)
-  const masjidIdSql = spec.entity === 'masjid' ? entityIdSql : String(spec.masjidId)
-  const version = spec.after.version
-  const afterExpr = isCreate ? `json_set(?, '$.id', ${entityIdSql})` : '?'
-  const respEntityId = isCreate ? LAST_CHANGE_ENTITY_ID : String(spec.entityId)
-  const respExpr = isCreate ? `json_set(?, '$.id', ${respEntityId})` : '?'
-
-  const stmts: D1PreparedStatement[] = [spec.entityStatement]
-
+  const stmts: D1PreparedStatement[] = []
+  const entityIdx: number[] = []
   const changeCols = 'entity, entity_id, masjid_id, op, version, origin_app, actor, changed_fields, before_json, after_json, occurred_at'
-  if (isCreate) {
+
+  specs.forEach((spec, index) => {
+    const isCreate = spec.op === 'create'
+    const origin = spec.originApp ?? ctx.originApp
+    const afterJson = JSON.stringify(spec.after)
+    const beforeJson = spec.before === null ? null : JSON.stringify(spec.before)
+    const fieldsJson = JSON.stringify(spec.changedFields)
+
+    // Entity id and masjid id as SQL: create takes them from the row just inserted.
+    const entityIdSql = isCreate ? 'last_insert_rowid()' : String(spec.entityId)
+    const masjidIdSql = spec.entity === 'masjid' ? entityIdSql : String(spec.masjidId)
+    const version = spec.after.version
+    const afterExpr = isCreate ? `json_set(?, '$.id', ${entityIdSql})` : '?'
+
+    entityIdx.push(stmts.length)
+    stmts.push(spec.entityStatement)
+    if (!isCreate) {
+      // Abort guard: raises (rolling the batch back) unless the UPDATE above matched exactly one row.
+      stmts.push(
+        db.prepare('INSERT INTO batch_guard (ok) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END'),
+        db.prepare('DELETE FROM batch_guard'),
+      )
+    }
     stmts.push(
       db.prepare(
         `INSERT INTO changes (${changeCols}) VALUES (?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ${afterExpr}, ?)`,
       ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, afterJson, now),
-      db.prepare(
-        `INSERT INTO idempotency_keys (api_key_id, key, request_hash, response_status, response_json, created_at)
-         VALUES (?, ?, ?, ?, ${respExpr}, ?)`,
-      ).bind(ctx.keyId, ctx.idemKey, ctx.requestHash, status, afterJson, now),
     )
-  } else {
-    stmts.push(
-      db.prepare(
-        `INSERT INTO changes (${changeCols})
-         SELECT ?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
-      ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, afterJson, now),
-      db.prepare(
-        `INSERT INTO idempotency_keys (api_key_id, key, request_hash, response_status, response_json, created_at)
-         SELECT ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
-      ).bind(ctx.keyId, ctx.idemKey, ctx.requestHash, status, afterJson, now),
-    )
-  }
+    if (index === 0) {
+      // The stored response is the first entity (the primary one).
+      const respExpr = isCreate ? `json_set(?, '$.id', ${LAST_CHANGE_ENTITY_ID})` : '?'
+      stmts.push(
+        db.prepare(
+          `INSERT INTO idempotency_keys (api_key_id, key, request_hash, response_status, response_json, created_at)
+           VALUES (?, ?, ?, ?, ${respExpr}, ?)`,
+        ).bind(ctx.keyId, ctx.idemKey, ctx.requestHash, spec.status, afterJson, now),
+      )
+    }
 
-  const guardSql = 'EXISTS (SELECT 1 FROM idempotency_keys WHERE api_key_id = ? AND key = ?)'
-  const guardBinds = [ctx.keyId, ctx.idemKey]
-  const builder: ChildBuilder = {
-    stmt(template, binds = []) {
-      if (!template.trimEnd().endsWith('{{G}}')) throw new Error('child statement template must end with {{G}}')
-      const sql = template.replace('{{ID}}', isCreate ? LAST_CHANGE_ENTITY_ID : String(spec.entityId)).replace('{{G}}', guardSql)
-      return db.prepare(sql).bind(...binds, ...guardBinds)
-    },
-  }
-  if (spec.children) stmts.push(...spec.children(builder))
+    const builder: ChildBuilder = {
+      stmt(template, binds = []) {
+        const sql = template.replaceAll('{{ID}}', isCreate ? LAST_CHANGE_ENTITY_ID : String(spec.entityId))
+        return db.prepare(sql).bind(...binds)
+      },
+    }
+    if (spec.children) stmts.push(...spec.children(builder))
+  })
 
   // Coalesced webhook ping for every other app's active subscription (same transaction).
+  // M2: a row that is pending and already backing off (attempts > 0) keeps its attempts and schedule, so steady
+  // writes cannot keep resetting a failing endpoint. Delivered, dropped or never-attempted rows restart.
+  const origin = specs[0].originApp ?? ctx.originApp
   stmts.push(
     db.prepare(
       `INSERT INTO webhook_deliveries (subscription_id, latest_seq, attempts, next_attempt_at, status, last_error, updated_at)
        SELECT s.id, ${LAST_CHANGE}, 0, ?, 'pending', NULL, ?
        FROM webhook_subscriptions s JOIN api_keys k ON k.id = s.api_key_id
-       WHERE s.active = 1 AND COALESCE(k.app_id, '') != ? AND ${guardSql}
+       WHERE s.active = 1 AND k.is_active = 1 AND k.revoked_at IS NULL AND COALESCE(k.app_id, '') != ?
        ON CONFLICT(subscription_id) DO UPDATE SET
          latest_seq = MAX(webhook_deliveries.latest_seq, excluded.latest_seq),
-         attempts = 0, next_attempt_at = excluded.next_attempt_at, status = 'pending',
-         last_error = NULL, updated_at = excluded.updated_at`,
-    ).bind(now, now, origin, ...guardBinds),
+         attempts = CASE WHEN webhook_deliveries.status = 'pending' AND webhook_deliveries.attempts > 0
+                         THEN webhook_deliveries.attempts ELSE 0 END,
+         next_attempt_at = CASE WHEN webhook_deliveries.status = 'pending' AND webhook_deliveries.attempts > 0
+                                THEN webhook_deliveries.next_attempt_at ELSE excluded.next_attempt_at END,
+         last_error = CASE WHEN webhook_deliveries.status = 'pending' AND webhook_deliveries.attempts > 0
+                           THEN webhook_deliveries.last_error ELSE NULL END,
+         status = 'pending',
+         updated_at = excluded.updated_at`,
+    ).bind(now, now, origin),
   )
-  return stmts
+  return { stmts, entityIdx }
 }
 
 /**
- * Runs the batch. Returns { ok: false } when the version guard lost (nothing was persisted).
+ * Runs the batch for several entity writes (S4 merge). Returns { ok: false } when any version guard lost
+ * (the abort guard rolled everything back: nothing was persisted). Other errors propagate.
  * Exported for tests that need to commit a stale spec without the handler's early version check.
  */
-export async function runCommit(ctx: WriteCtx, spec: WriteSpec, now: string = isoNow()): Promise<CommitResult> {
-  const results = await ctx.db.batch(buildCommitStatements(ctx, spec, now))
-  const first = results[0]
-  if (spec.op !== 'create' && (first.meta.changes ?? 0) !== 1) return { ok: false }
+export async function runCommitMany(ctx: WriteCtx, specs: WriteSpec[], now: string = isoNow()): Promise<CommitManyResult> {
+  if (specs.length === 0) throw new Error('runCommitMany needs at least one spec')
+  const { stmts, entityIdx } = buildCommitStatements(ctx, specs, now)
+  let results: D1Result[]
+  try {
+    results = await ctx.db.batch(stmts)
+  } catch (err) {
+    if (isVersionGuardError(err)) return { ok: false }
+    throw err
+  }
 
-  const seqRow = await ctx.db
-    .prepare('SELECT seq FROM changes WHERE entity = ? AND entity_id = ? AND version = ? ORDER BY seq DESC LIMIT 1')
-    .bind(spec.entity, spec.op === 'create' ? first.meta.last_row_id : spec.entityId, spec.after.version)
-    .first<{ seq: number }>()
-  const entity = spec.op === 'create' ? { ...spec.after, id: first.meta.last_row_id } : spec.after
-  return { ok: true, seq: seqRow?.seq ?? 0, entity, status: spec.status }
+  const out: Array<{ seq: number; entity: { id: number; version: number } }> = []
+  for (const [i, spec] of specs.entries()) {
+    const first = results[entityIdx[i]]
+    const entity = spec.op === 'create' ? { ...spec.after, id: first.meta.last_row_id } : spec.after
+    const seqRow = await ctx.db
+      .prepare('SELECT seq FROM changes WHERE entity = ? AND entity_id = ? AND version = ? ORDER BY seq DESC LIMIT 1')
+      .bind(spec.entity, entity.id, spec.after.version)
+      .first<{ seq: number }>()
+    out.push({ seq: seqRow?.seq ?? 0, entity })
+  }
+  return { ok: true, results: out, status: specs[0].status }
+}
+
+/** Single-entity commit: the one-spec case of runCommitMany. */
+export async function runCommit(ctx: WriteCtx, spec: WriteSpec, now: string = isoNow()): Promise<CommitResult> {
+  const r = await runCommitMany(ctx, [spec], now)
+  if (!r.ok) return { ok: false }
+  return { ok: true, seq: r.results[0].seq, entity: r.results[0].entity, status: r.status }
+}
+
+/**
+ * M1: runs a handler step and, when it ends in a 404 / version_conflict, re-checks idempotency first. A request
+ * that raced its own retry (the first attempt committed in between) gets the stored response replayed instead
+ * of a spurious 409/404. A key stored for a different request still answers 409 idempotency_mismatch.
+ */
+export async function replayOnConflict(
+  ctx: Pick<WriteCtx, 'db' | 'keyId' | 'idemKey' | 'requestHash'>,
+  fn: () => Promise<Response>,
+): Promise<Response> {
+  try {
+    return await fn()
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.code === 'version_conflict')) {
+      const replay = await lookupIdempotent(ctx)
+      if (replay) return replay
+    }
+    throw err
+  }
 }
 
 export async function commitWrite(c: Context<AppEnv>, ctx: WriteCtx, spec: WriteSpec): Promise<Response> {
@@ -276,7 +337,8 @@ export async function commitWrite(c: Context<AppEnv>, ctx: WriteCtx, spec: Write
   }
 
   if (!result.ok) {
-    const replay = await lookupIdempotent(ctx) // same key retried while the first attempt won
+    // Guard lost: same key retried while the first attempt won -> replay (M1); otherwise a real conflict.
+    const replay = await lookupIdempotent(ctx)
     if (replay) return replay
     throw versionConflict(spec.loadCurrent ? await spec.loadCurrent() : null)
   }
