@@ -100,3 +100,36 @@ Commits: `masjidsentral-db-schema` 594c123 (`002_api_keys.sql` tracked, byte-ide
 Tests: 194 passing (`npx vitest run`), `npx tsc --noEmit` clean.
 
 Deploy note: before applying 003/004, the owner must check the remote `d1_migrations` list shows 001 and 002 applied. 002 is now committed in the schema repo. If prod never recorded 002, it must run first (it is unchanged on disk). 004 now also creates `batch_guard` and the webhook UNIQUE; it is still destructive (Time Travel bookmark first).
+
+## S3 — Contract endpoints (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+Commits (`api` only; no schema change, 004 untouched): `feat(sync): S3 endpoints ...` (source), `feat(sync): S3 tests ...`, this note. Tests: 270 passing (`npx vitest run`), `npx tsc --noEmit` clean.
+
+Built
+- `src/lib/match.ts`: normalisation, Jaro-Winkler (TS), score, `findCandidates` (geohash ranges + haversine, 1 km, best 50 scored). `src/lib/constants.ts` (categories, contact types), `src/lib/page.ts` (limit/cursor/instant parsing), `geohashRanges`/`haversineM` in `geo.ts` (range scans `geohash >= p AND < p~` use the plain index; cell size picked so the 9-cell ring always covers the radius).
+- Masjids: list (filters `state city type name|q jumaat updated_since`, `limit` <= 100, opaque `cursor`, `{ data, next_cursor }`, full contract entities, active only), nearby (metres, max 20,000, nearest first, `distance_m`, limit/cursor), `match`, `by-external`, POST (gate, `external_id`, contacts/facilities/images), PATCH (partial contacts by type, facilities by code, null deletes, unknown code 422), `PUT /masjids/:id/external-ids/:app_id`, `DELETE`.
+- Programmes (`src/routes/events.ts`): `GET /events?masjid_ids=`, `/events/:id`, `/events/by-external/...`, `GET|POST /masjids/:id/events`, `PATCH`/`DELETE /events/:id`; `loadEvent`/`hydrateEvents` in `entities.ts` (event 409s return `details.current`).
+- `GET /facilities`. All GET routes in these routers need the `read` scope.
+- Every new mutating handler: `beginWrite` then `replayOnConflict`, writes via `commitWrite`. List endpoints batch-load children with `json_each(?)` (4 queries per page, not per masjid; also stays under D1's 100-bind limit).
+- Pipeline additions (`write.ts`): `WriteSpec.changeExtra` (keys recorded in `changes.after_json` only; used for `"forced": true`) and `beginWrite({ idempotencyOptional })` (PUT).
+
+New error codes
+- `possible_duplicate` (409, `details.candidates[]`), `already_linked` (409; `details.masjid_id`, `app_id`, `external_id`; for programmes `details.event_id`). No other new codes. `already_exists` stays admin-only (S2).
+
+Interpretations / deviations (orchestrator: review for the contract)
+1. **Spec fixture 2 needs the Winkler threshold.** Surau Al-Ikhlas vs Surau An-Nur (30 m): `alikhlas` vs `annur` has Jaro 0.442; with the prefix boost always applied the score is 0.631 (> 0.6, fixture fails). I apply the boost only when Jaro > 0.7 (Winkler's original rule), giving 0.591. Fixture 1 scores 0.988.
+2. **Response shapes the contract leaves open:** list/nearby/events lists are `{ "data": [...], "next_cursor": string|null }` (full contract entities; nearby rows add `distance_m`); match is `{ "candidates": [ { id, name, type_id, lat, lng, address, external_ids, score, distance_m } ] }` (same objects as `details.candidates`); facilities is `{ "data": [ { code, label_en, label_ms, sort_order } ] }`. Please write these into the contract. Old `meta {total,page,per_page}` and `?page=` are gone (v1.0 shape; existing tests updated).
+3. `PUT .../external-ids` does not require `Idempotency-Key` (contract R4 lists only POST/PATCH/DELETE) nor `If-Match`; a missing key gets a private random one, and the handler is naturally idempotent (same id = 200 no-op, no version bump). On a version race it reloads and retries up to 3 times. `Idempotency-Key` is honoured if sent.
+4. `forced: true` is written to `changes.after_json` whenever `?force=true` is sent (not only when a duplicate existed, since a forced request skips the candidate query). The 201 response and stored idempotent response do not contain it; `/changes` `data` does (R10 makes it harmless).
+5. Gate order on POST: validation, `already_linked`, then `possible_duplicate`. Gate uses all candidates within 1 km (best 50 by score), not only the top 5; `details.candidates` lists up to 5 qualifying ones.
+6. Retired (inactive) catalogue codes (`OKU_FRIENDLY`) cannot be set (422 like unknown) but can be cleared with `available: null`.
+7. `by-external` returns the entity in any status (deleted tombstone, merged row as is). A deleted masjid keeps its external ids, so re-POSTing the same `external_id` is `already_linked`. Revive/relink after delete is not specified (S4 revert?).
+8. DELETE on a non-active masjid/programme is 404 (like PATCH). Programmes: PATCH `status: deleted` is 422 (use DELETE), PATCH on a deleted programme is 404, `GET /events/:id` returns the tombstone. A programme POST to a missing, deleted or merged masjid is 404 (`details.merged_into` when merged). `GET /masjids/:id/events` of a merged masjid is 301 to the survivor, of a deleted/missing one 404. `/events?masjid_ids=` hides programmes of non-active masjids.
+9. Dates: `start_at`/`end_at`/`from`/`to`/`updated_since` must be ISO 8601 UTC ending in `Z` (real calendar instants; offsets are 422), normalised to second precision. `GET` events default window: now .. now + 90 days; ordered by `start_at, id`; `limit` default 50, max 100. List default `limit` 20, nearby default radius 5,000 m.
+10. `contacts`/`facilities` listing the same key twice in one request is 422. POST accepts `contacts`, `facilities`, `images`, `external_id`; a `null` entry on POST is ignored.
+11. A PATCH still bumps the version when nothing changed (S2 rule). `GET` list entities carry `images` etc. in full, so a 100-row page is heavier than v1.0's slim rows; `limit` default 20 keeps typical calls small.
+12. Test helper `createMasjid` now sends `?force=true` by default (the gate would reject the repeated fixture); pass `{ force: false }` to exercise the gate. One S2 test asserts `after_json == GET`, so it creates at a distinct spot without force.
+
+Contract §10 checks shown at server level in `tests/s3-masjids.test.ts` / `tests/events.test.ts`: 2, 3, 7, 8, 9, 11 (plus programme 409/idempotency/race).
+
+Not done / for S4: admin routes, merge (so check 10), revert, duplicate scan, `openapi.json` v1.1 (still v1.0; `openapi.test.ts` unchanged), README.
