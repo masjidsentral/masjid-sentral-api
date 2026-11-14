@@ -155,7 +155,7 @@ describe('dispatch', () => {
     expect(await delivery(sub)).toMatchObject({ status: 'pending', latest_seq: 8 })
   })
 
-  it('processes at most 50 due rows per run', async () => {
+  it('processes at most 40 due rows per run', async () => {
     const key = await keyId('webhook')
     for (let i = 0; i < 55; i++) {
       const s = await env.DB.prepare('INSERT INTO webhook_subscriptions (api_key_id, url, secret) VALUES (?, ?, ?) RETURNING id')
@@ -163,8 +163,8 @@ describe('dispatch', () => {
       await setDelivery(s!.id, {})
     }
     const fetchFn = (async () => new Response('ok')) as unknown as typeof fetch
-    expect((await dispatchDue(env.DB, { fetchFn })).delivered).toBe(50)
-    expect((await dispatchDue(env.DB, { fetchFn })).delivered).toBe(5)
+    expect((await dispatchDue(env.DB, { fetchFn })).delivered).toBe(40)
+    expect((await dispatchDue(env.DB, { fetchFn })).delivered).toBe(15)
   })
 
   it('skips inactive subscriptions', async () => {
@@ -226,6 +226,71 @@ describe('enqueue on write', () => {
   })
 })
 
+describe('backoff under steady writes (M2) and revoked keys (L4)', () => {
+  const failing = () => vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('down', { status: 500 }))
+
+  it('a failing endpoint keeps backing off and drops while writes keep coming; a later write revives it', async () => {
+    const spy = failing()
+    try {
+      const sub = await addSub('webhook')
+      const m = await createMasjid()
+      let version = m.version
+      const farFuture = new Date(Date.now() + 3600_000)
+      // Already one failed attempt, retry scheduled: new changes must not reset it.
+      await setDelivery(sub, { attempts: 1, next: isoNow(farFuture), latest_seq: 1 })
+      let next = String((await delivery(sub))!.next_attempt_at)
+
+      for (let attempts = 1; attempts < 6; attempts++) {
+        const res = await patchMasjid(m.id, version, { name: `Steady ${attempts}` })
+        expect(res.status).toBe(200)
+        version = ((await res.json()) as { version: number }).version
+        const row = (await delivery(sub))!
+        expect(row).toMatchObject({ status: 'pending', attempts, next_attempt_at: next }) // schedule kept
+        const maxSeq = (await env.DB.prepare('SELECT MAX(seq) AS s FROM changes').first<{ s: number }>())!.s
+        expect(row.latest_seq).toBe(maxSeq) // but latest_seq follows the writes
+
+        // The retry fires at its scheduled time and fails while a newer change exists.
+        await dispatchDue(env.DB, { now: new Date(next), fetchFn: (async () => new Response('x', { status: 500 })) as unknown as typeof fetch })
+        const after = (await delivery(sub))!
+        if (attempts < 5) {
+          expect(after).toMatchObject({ status: 'pending', attempts: attempts + 1 })
+          next = String(after.next_attempt_at)
+          expect(Date.parse(next)).toBeGreaterThan(Date.parse(String(row.next_attempt_at)))
+        } else {
+          expect(after).toMatchObject({ status: 'dropped', attempts: 6 })
+        }
+      }
+
+      // A dropped endpoint recovers on the next change.
+      const res = await patchMasjid(m.id, version, { name: 'Revive' })
+      expect(res.status).toBe(200)
+      expect(await delivery(sub)).toMatchObject({ status: 'pending', last_error: null })
+      expect((await delivery(sub))!.attempts).toBeLessThanOrEqual(1) // 0, or 1 if the background dispatch already tried
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('revoked or deactivated keys get no enqueue and no dispatch', async () => {
+    const spy = failing()
+    const kid = await keyId('webhook')
+    try {
+      const sub = await addSub('webhook')
+      await env.DB.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').bind(isoNow(), kid).run()
+      await createMasjid()
+      expect(await delivery(sub)).toBeNull() // not enqueued
+
+      await setDelivery(sub, {})
+      expect((await dispatchDue(env.DB, { fetchFn: (async () => new Response('ok')) as unknown as typeof fetch })).claimed).toBe(0)
+      await env.DB.prepare('UPDATE api_keys SET revoked_at = NULL, is_active = 0 WHERE id = ?').bind(kid).run()
+      expect((await dispatchDue(env.DB, { fetchFn: (async () => new Response('ok')) as unknown as typeof fetch })).claimed).toBe(0)
+    } finally {
+      await env.DB.prepare('UPDATE api_keys SET revoked_at = NULL, is_active = 1 WHERE id = ?').bind(kid).run()
+      spy.mockRestore()
+    }
+  })
+})
+
 describe('admin webhook registration', () => {
   it('creates a subscription, returns the whsec_ secret once, and never lists it', async () => {
     const res = await adminJson('POST', '/admin/webhooks', { api_key_id: await keyId('webhook'), url: 'https://qiyam.example/hook' })
@@ -251,6 +316,19 @@ describe('admin webhook registration', () => {
     expect((await adminJson('POST', '/admin/webhooks', { api_key_id: await keyId('jm'), url: 'https://x.example/h' })).status).toBe(422)
     expect((await adminJson('POST', '/admin/webhooks', { api_key_id: 999999, url: 'https://x.example/h' })).status).toBe(422)
     expect((await adminJson('POST', '/admin/webhooks', { url: 'https://x.example/h' })).status).toBe(422)
+  })
+
+  it('a duplicate (key, url) registration is 409 already_exists and does not touch the first', async () => {
+    const body = { api_key_id: await keyId('webhook'), url: 'https://dup.example/hook' }
+    const first = await adminJson('POST', '/admin/webhooks', body)
+    expect(first.status).toBe(201)
+    const second = await adminJson('POST', '/admin/webhooks', body)
+    expect(second.status).toBe(409)
+    const text = await second.text()
+    expect(JSON.parse(text)).toMatchObject({ code: 'already_exists' })
+    expect(text).not.toContain('whsec_')
+    const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM webhook_subscriptions').first<{ n: number }>()
+    expect(n!.n).toBe(1)
   })
 
   it('is admin-only', async () => {

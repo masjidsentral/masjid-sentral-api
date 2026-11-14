@@ -40,22 +40,17 @@ changesRouter.get('/', async (c) => {
       origin_app: string; changed_fields: string; occurred_at: string; after_json: string
     }>()
 
+  // after_json / changed_fields are stored as JSON text written by JSON.stringify: splice them into the body
+  // as-is instead of parsing and re-serialising every row.
   const page = rows.results.slice(0, limit)
-  const changes = page.map(r => ({
-    seq: r.seq,
-    entity: r.entity,
-    entity_id: r.entity_id,
-    masjid_id: r.masjid_id,
-    op: r.op,
-    version: r.version,
-    origin_app: r.origin_app,
-    changed_fields: JSON.parse(r.changed_fields) as string[],
-    occurred_at: r.occurred_at,
-    data: JSON.parse(r.after_json) as unknown,
-  }))
-  return c.json({
-    changes,
-    next_after: changes.length ? changes[changes.length - 1].seq : after,
-    has_more: rows.results.length > limit,
-  })
+  const items = page.map(r =>
+    `{"seq":${r.seq},"entity":${JSON.stringify(r.entity)},"entity_id":${r.entity_id},"masjid_id":${r.masjid_id === null ? 'null' : r.masjid_id},` +
+    `"op":${JSON.stringify(r.op)},"version":${r.version},"origin_app":${JSON.stringify(r.origin_app)},` +
+    `"changed_fields":${r.changed_fields},"occurred_at":${JSON.stringify(r.occurred_at)},"data":${r.after_json}}`,
+  )
+  const nextAfter = page.length ? page[page.length - 1].seq : after
+  return new Response(
+    `{"changes":[${items.join(',')}],"next_after":${nextAfter},"has_more":${rows.results.length > limit}}`,
+    { headers: { 'content-type': 'application/json' } },
+  )
 })

@@ -5,7 +5,8 @@ import { isoNow } from './time'
 /** Retry delays after failed attempt 1..5 (contract section 7): 1 m, 5 m, 30 m, 2 h, 6 h, then dropped. */
 export const BACKOFF_SECONDS = [60, 5 * 60, 30 * 60, 2 * 3600, 6 * 3600] as const
 
-const BATCH_LIMIT = 50
+/** Free plan: 50 subrequests per invocation; keep headroom for the D1 calls. */
+const BATCH_LIMIT = 40
 const LEASE_SECONDS = 120
 const TIMEOUT_MS = 5000
 
@@ -77,7 +78,8 @@ export interface DispatchSummary {
 /**
  * Sends every due ping (status pending, next_attempt_at reached). Rows are leased (next_attempt_at pushed out)
  * before sending so the cron and a waitUntil dispatch never send the same ping twice. A result only applies
- * while latest_seq is unchanged: a newer change resets the row to pending and is sent next time.
+ * while latest_seq is unchanged: a newer change resets the row to pending and is sent next time. A failure counts regardless of newer changes
+ * (the endpoint is down either way), so steady writes cannot keep a dead endpoint from backing off and dropping.
  */
 export async function dispatchDue(db: D1Database, opts: DispatchOptions = {}): Promise<DispatchSummary> {
   const fetchFn = opts.fetchFn ?? fetch
@@ -91,7 +93,9 @@ export async function dispatchDue(db: D1Database, opts: DispatchOptions = {}): P
        WHERE subscription_id IN (
          SELECT d.subscription_id FROM webhook_deliveries d
          JOIN webhook_subscriptions s ON s.id = d.subscription_id
+         JOIN api_keys k ON k.id = s.api_key_id
          WHERE d.status = 'pending' AND d.next_attempt_at <= ? AND s.active = 1
+           AND k.is_active = 1 AND k.revoked_at IS NULL
          ORDER BY d.next_attempt_at LIMIT ?)
        RETURNING subscription_id, latest_seq, attempts`,
     )
@@ -152,16 +156,16 @@ export async function dispatchDue(db: D1Database, opts: DispatchOptions = {}): P
       updates.push(
         db.prepare(
           `UPDATE webhook_deliveries SET status = 'dropped', attempts = ?, last_error = ?, updated_at = ?
-           WHERE subscription_id = ? AND latest_seq = ?`,
-        ).bind(attempts, error, nowIso, row.subscription_id, row.latest_seq),
+           WHERE subscription_id = ? AND status = 'pending'`,
+        ).bind(attempts, error, nowIso, row.subscription_id),
       )
     } else {
       summary.failed++
       updates.push(
         db.prepare(
           `UPDATE webhook_deliveries SET attempts = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-           WHERE subscription_id = ? AND latest_seq = ?`,
-        ).bind(attempts, isoNow(new Date(now.getTime() + delay * 1000)), error, nowIso, row.subscription_id, row.latest_seq),
+           WHERE subscription_id = ? AND status = 'pending'`,
+        ).bind(attempts, isoNow(new Date(now.getTime() + delay * 1000)), error, nowIso, row.subscription_id),
       )
     }
   }))

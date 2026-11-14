@@ -53,10 +53,19 @@ adminRouter.post('/webhooks', async (c) => {
 
   getActor(c) // writeGuard already validated it; admin actions are attributable
   const secret = newSecret()
-  const row = await c.env.DB
-    .prepare('INSERT INTO webhook_subscriptions (api_key_id, url, secret) VALUES (?, ?, ?) RETURNING id, created_at')
-    .bind(keyId, url, secret)
-    .first<{ id: number; created_at: string }>()
+  let row: { id: number; created_at: string } | null
+  try {
+    row = await c.env.DB
+      .prepare('INSERT INTO webhook_subscriptions (api_key_id, url, secret) VALUES (?, ?, ?) RETURNING id, created_at')
+      .bind(keyId, url, secret)
+      .first<{ id: number; created_at: string }>()
+  } catch (err) {
+    // UNIQUE (api_key_id, url): a duplicate registration is a 409 and never reveals the existing secret.
+    if (String(err instanceof Error ? err.message : err).includes('UNIQUE')) {
+      throw new ApiError(409, 'already_exists', 'That key already has a webhook for this URL; delete it first to rotate the secret')
+    }
+    throw err
+  }
   // The secret is returned once.
   return c.json({ id: row!.id, api_key_id: keyId, app_id: key.app_id, url, secret, active: true, created_at: row!.created_at }, 201)
 })
