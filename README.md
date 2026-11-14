@@ -17,7 +17,7 @@ Hono Worker on Cloudflare Workers + D1. The master copy of masjids and their pro
 - **Change feed.** Each write is logged in one atomic D1 batch (`changes`). `GET /changes?after=` is the source of truth; webhooks (`changes.available`, HMAC-signed) only wake the other app up.
 - **Linking and matching.** `external-ids` links, `by-external` lookups, `GET /masjids/match` and a duplicate gate on `POST /masjids`.
 - **Programmes** (`/masjids/{id}/events`, `/events/...`) and the facility catalogue (`GET /facilities`).
-- **Admin.** Merge a duplicate masjid, revert a logged change, a daily duplicate scan with a review queue (`/admin/duplicates`), and webhook registration.
+- **Admin.** Merge a duplicate masjid, revert a logged change, an hourly duplicate scan with a review queue (`/admin/duplicates`), and webhook registration.
 - **Rate limit:** 600 requests per minute per key (Workers Rate Limiting binding `RATE_LIMITER`).
 
 ## Local development and tests

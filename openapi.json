@@ -196,6 +196,16 @@
               }
             }
           },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
             "content": {
@@ -400,6 +410,16 @@
           },
           "403": {
             "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -650,6 +670,16 @@
               }
             }
           },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
             "content": {
@@ -755,6 +785,16 @@
           },
           "403": {
             "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1437,6 +1477,16 @@
               }
             }
           },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
             "content": {
@@ -1701,6 +1751,16 @@
           },
           "403": {
             "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2356,6 +2416,16 @@
               }
             }
           },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
             "content": {
@@ -2693,7 +2763,7 @@
           "Admin"
         ],
         "summary": "Merge a duplicate into a survivor",
-        "description": "The masjid in the path is removed; `into` survives. One atomic write: the survivor gets an `update` (external_ids), the loser a `merge` change (`merged_into`, `moved_external_ids`), and each live programme an `event` `update` with the new masjid_id. A survivor may end up holding two ids from one app. Pending queue rows are resolved. More than 200 live programmes on the loser: 422 `details.reason: too_many_events`. `Idempotency-Key` optional.",
+        "description": "The masjid in the path is removed; `into` survives. One atomic write, changes in this order: the loser gets a `merge` change (`merged_into`, `moved_external_ids`), then each live programme an `event` `update` with the new masjid_id (`via_merge`), then the survivor an `update` (external_ids, `via_merge`). The response is the merged loser. A survivor may end up holding two ids from one app. Pending queue rows are resolved: the pair becomes `merged`, the loser's other pending pairs are re-pointed to the survivor. Masjids already merged into the loser now point at the survivor (one 301 hop). The optional `reason` is kept in the admin log only, never in `/changes`. More than 200 live programmes on the loser: 422 `details.reason: too_many_events`. `Idempotency-Key` required.",
         "parameters": [
           {
             "name": "X-Sentral-Actor",
@@ -2718,8 +2788,8 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "required": false,
-            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Optional here.",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -2819,7 +2889,7 @@
           "Admin"
         ],
         "summary": "Revert a change",
-        "description": "Applies the change's `before_json` as a new write (actor `revert:<seq>`, origin `sentral_admin`) using the current version. Create revert = soft delete; delete revert = restore as active; link changes restore the external-id rows. 422 for merges and the changes a merge made (`merge_not_revertable`), for merged entities (`entity_merged`), an already-deleted/not-deleted entity, or a programme whose masjid is not active. A concurrent write is 409; retry.",
+        "description": "Field-level revert. For an `update`, only the fields listed in the change's `changed_fields` are restored, from its `before_json`, as a new write (actor `revert:<seq>:<admin actor>`, origin `sentral_admin`, current version). External ids: only the ids that change added or removed are undone, never the whole set. Contacts, facilities and images are restored only when listed. If a later change to the same entity touched any of those fields: 422 `stale_revert` with `details.later_seqs`, unless `?force=true` (the new change then has `forced: true` in `data`). Create revert = soft delete (cascades to programmes); delete revert = restore as active. 422 `validation_failed` for merges and the changes a merge made (`merge_not_revertable`), merged entities (`entity_merged`), an already-deleted/not-deleted entity, a programme whose masjid is not active, or a change with nothing to restore (`nothing_to_revert`). A concurrent write is 409; retry. `Idempotency-Key` required.",
         "parameters": [
           {
             "name": "X-Sentral-Actor",
@@ -2844,12 +2914,22 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "required": false,
-            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Optional here.",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
             "schema": {
               "type": "string",
               "minLength": 1,
               "maxLength": 255
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "description": "`true` to revert despite later changes to the same fields (default `false`).",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -2885,7 +2965,7 @@
             }
           },
           "422": {
-            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "description": "Validation failed (`validation_failed`), or `stale_revert` (`details.later_seqs`, `details.fields`) when later changes touched the same fields",
             "content": {
               "application/json": {
                 "schema": {
@@ -2942,7 +3022,7 @@
           "Admin"
         ],
         "summary": "Duplicate review queue",
-        "description": "Produced by the daily scan (score >= 0.8, within 150 m).",
+        "description": "Produced by the hourly scan (score >= 0.8, within 150 m).",
         "parameters": [
           {
             "name": "status",
@@ -2995,6 +3075,16 @@
           },
           "403": {
             "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3056,7 +3146,7 @@
           "Admin"
         ],
         "summary": "Dismiss a pair",
-        "description": "'These are different places'. Dismissing twice is a no-op; a merged pair is 422 `not_pending`. A dismissed pair is never re-queued.",
+        "description": "'These are different places'. Dismissing twice is a no-op; a merged pair is 422 `not_pending`. A dismissed pair is never re-queued. The admin actor and time are recorded on the row (not returned). `Idempotency-Key` required.",
         "parameters": [
           {
             "name": "X-Sentral-Actor",
@@ -3076,6 +3166,17 @@
             "description": "Id",
             "schema": {
               "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Required here (422 `validation_failed` when missing). Same key and same request within 24 h returns the original response.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -3151,7 +3252,7 @@
           "Admin"
         ],
         "summary": "Merge a queued pair",
-        "description": "`into` must be `masjid_a` or `masjid_b`; the other is merged into it (same write as the masjid merge). The row becomes `merged`; other pending rows involving the removed masjid become `dismissed`.",
+        "description": "`into` must be `masjid_a` or `masjid_b`; the other is merged into it (same write as the masjid merge). The row becomes `merged`; the removed masjid's other pending pairs are re-pointed to the survivor. `Idempotency-Key` required.",
         "parameters": [
           {
             "name": "X-Sentral-Actor",
@@ -3176,8 +3277,8 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "required": false,
-            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Optional here.",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -3269,6 +3370,59 @@
         },
         "x-required-scope": "admin"
       }
+    },
+    "/admin/scan": {
+      "get": {
+        "operationId": "adminScanStatus",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Duplicate scan status",
+        "description": "The scan runs hourly (150 masjids per run) and continues from its cursor. Use this to see progress, the last run and the last error.",
+        "responses": {
+          "200": {
+            "description": "Scan state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
     }
   },
   "components": {
@@ -3300,9 +3454,10 @@
               "internal",
               "possible_duplicate",
               "already_linked",
-              "already_exists"
+              "already_exists",
+              "stale_revert"
             ],
-            "description": "Machine code. `already_exists` is admin-only (POST /admin/webhooks)."
+            "description": "Machine code. `already_exists` is admin-only (POST /admin/webhooks). `stale_revert` is admin-only (POST /admin/changes/{seq}/revert, 422)."
           },
           "details": {
             "type": "object",
@@ -4415,13 +4570,20 @@
             "format": "date-time"
           },
           "data": {
-            "description": "Full entity after the change, same shape as GET (a merge change also has `merged_into`)",
-            "oneOf": [
+            "description": "Full entity after the change, same shape as GET, plus the optional extra keys in `ChangeDataExtras`. An admin's merge `reason` is never included.",
+            "allOf": [
               {
-                "$ref": "#/components/schemas/Masjid"
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Masjid"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Programme"
+                  }
+                ]
               },
               {
-                "$ref": "#/components/schemas/Programme"
+                "$ref": "#/components/schemas/ChangeDataExtras"
               }
             ]
           }
@@ -4780,7 +4942,7 @@
             ]
           }
         },
-        "description": "`masjid_a` < `masjid_b` by id.",
+        "description": "`masjid_a` < `masjid_b` by id. Produced by the hourly scan.",
         "required": [
           "id",
           "status",
@@ -4823,6 +4985,98 @@
         },
         "required": [
           "into"
+        ]
+      },
+      "ChangeDataExtras": {
+        "type": "object",
+        "description": "Optional extra keys a change's `data` may carry besides the entity fields. Ignore unknown keys.",
+        "properties": {
+          "via_merge": {
+            "type": "integer",
+            "description": "The change was made by merging this masjid id into another (survivor update, moved programme update)."
+          },
+          "moved_external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            },
+            "description": "On a `merge` change: the external ids that moved to the survivor."
+          },
+          "merged_into": {
+            "type": "integer",
+            "description": "On a `merge` change: the survivor id."
+          },
+          "forced": {
+            "type": "boolean",
+            "description": "Set when an admin reverted despite later changes to the same fields."
+          }
+        }
+      },
+      "ScanStatus": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "object",
+            "properties": {
+              "updated_at": {
+                "type": "string"
+              },
+              "id": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "updated_at",
+              "id"
+            ],
+            "description": "Every masjid up to this (updated_at, id) has been scanned."
+          },
+          "last_run_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_run_scanned": {
+            "type": "integer",
+            "description": "Masjids fully processed in the last run."
+          },
+          "last_run_queued": {
+            "type": "integer",
+            "description": "Pairs newly queued in the last run."
+          },
+          "last_error": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Message of the last failed run; null after a clean run."
+          },
+          "masjids_remaining": {
+            "type": "integer",
+            "description": "Active masjids after the cursor."
+          },
+          "max_masjids_per_run": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor",
+          "last_run_at",
+          "last_run_scanned",
+          "last_run_queued",
+          "last_error",
+          "masjids_remaining",
+          "max_masjids_per_run"
         ]
       }
     }

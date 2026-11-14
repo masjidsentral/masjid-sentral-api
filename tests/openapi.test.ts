@@ -97,8 +97,25 @@ describe('openapi.json v1.1', () => {
     const codes = (spec.components.schemas.Error.properties.code as { enum: string[] }).enum
     expect(codes.sort()).toEqual([
       'already_exists', 'already_linked', 'forbidden', 'idempotency_mismatch', 'internal', 'not_found',
-      'possible_duplicate', 'rate_limited', 'unauthorized', 'validation_failed', 'version_conflict',
+      'possible_duplicate', 'rate_limited', 'stale_revert', 'unauthorized', 'validation_failed', 'version_conflict',
     ])
+  })
+
+  it('documents 422 on every read route that validates its query, and the admin scan route', () => {
+    const paths = spec.paths as Record<string, Record<string, Op>>
+    for (const p of ['/masjids', '/masjids/nearby', '/masjids/match', '/events', '/masjids/{id}/events', '/changes', '/cities', '/admin/duplicates']) {
+      expect(Object.keys(paths[p].get!.responses!), p).toContain('422')
+    }
+    expect(paths['/masjids/{id}/events'].get!.responses).toHaveProperty('301')
+    expect(paths['/admin/scan'].get).toBeTruthy()
+    expect(Object.keys(spec.components.schemas.ChangeDataExtras.properties).sort()).toEqual(['forced', 'merged_into', 'moved_external_ids', 'via_merge'])
+  })
+
+  it('admin merge, revert and dismiss document a required Idempotency-Key', () => {
+    const paths = spec.paths as Record<string, Record<string, { parameters: Array<{ name: string; required: boolean }> }>>
+    for (const p of ['/admin/masjids/{id}/merge', '/admin/changes/{seq}/revert', '/admin/duplicates/{id}/dismiss', '/admin/duplicates/{id}/merge']) {
+      expect(paths[p].post.parameters.find(x => x.name === 'Idempotency-Key')?.required, p).toBe(true)
+    }
   })
 
   it('every $ref resolves', () => {
