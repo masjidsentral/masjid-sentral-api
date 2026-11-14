@@ -1,0 +1,328 @@
+# Masjid Sentral — App Integration Contract (v1.1)
+
+> **For coding agents.** This file is self-contained. You need no other context
+> to build an integration. Read §0 first, build in the order of §9, and pass
+> every check in §10. Where this file and older docs disagree, **this file wins**
+> until `GET /openapi.json` publishes v1.1.
+
+| | |
+|---|---|
+| Status | **DRAFT v1.1**, 2026-11-14. Endpoints marked **NEW** are not deployed yet. |
+| Maintainers | Jejak Masjid (JM) × Qiyam |
+| Base URL | `https://api.masjidsentral.workers.dev` (prod). A staging URL is handed out with your key. |
+| Audience | Any app that reads or writes Masjid Sentral data (first: JM, Qiyam) |
+
+---
+
+## 0. Agent brief
+
+**Goal.** Masjid Sentral is the **master copy** of masjids, their details and
+their programmes. When a user of app A edits a masjid detail or adds a
+programme, users of app B must see it, and the reverse.
+
+**What you build in your app:**
+
+1. A **link** from every local masjid to its Sentral masjid (`sentral_id`).
+2. An **outbound path**: every local edit to a masjid detail or programme is
+   sent to Sentral (through a retrying outbox).
+3. An **inbound path**: a webhook receiver plus a pull of `GET /changes`, so
+   Sentral changes are applied to your local copy.
+
+**What you do NOT build:** a Sentral server, a Sentral website, user accounts
+in Sentral. Your app keeps its own users, check-ins, points and other
+app-specific data. Sentral never sees them.
+
+**Hard rules (MUST / MUST NOT):**
+
+- **R1** MUST send `Authorization: Bearer <api_key>` on every request, reads included. The key is a server secret: MUST NOT ship it inside a mobile app or browser bundle. Call Sentral from your backend only.
+- **R2** MUST apply an inbound change only when `change.version > local.sentral_version` for that entity (§6.3). This one rule handles echoes of your own writes, duplicates and out-of-order delivery.
+- **R3** MUST send `If-Match: <version>` on every `PATCH`/`DELETE` and handle `409` (§5.4).
+- **R4** MUST send an `Idempotency-Key` on every `POST`/`PATCH`/`DELETE`. Use your outbox row id. Retries reuse the same key.
+- **R5** MUST verify the webhook signature before trusting the body (§7).
+- **R6** MUST treat `GET /changes` as the source of truth. Webhooks are only a "wake up and pull" ping. Run a scheduled pull at least every 15 minutes even if no webhook arrives.
+- **R7** MUST moderate your own users' input **before** sending it. Sentral trusts app keys and publishes writes to every other app straight away.
+- **R8** MUST NOT send personal data: no user names, emails, phone numbers or device ids. `X-Sentral-Actor` is an opaque, app-local id (§3).
+- **R9** MUST NOT round or coarsen coordinates. Send full-precision WGS84 `lat`/`lng`. Prayer-zone lookups downstream fail on rounded points.
+- **R10** MUST ignore unknown JSON fields and unknown `change.entity` values. Do not fail on them. New fields are added without a version bump.
+- **R11** MUST handle `op: "merge"` (§6.4). Duplicates are merged into one masjid and your links must follow.
+
+---
+
+## 1. Conventions
+
+- JSON, UTF-8. Field names are `snake_case`.
+- Timestamps: ISO 8601 UTC with `Z` (`2026-11-14T10:30:00Z`). Programmes also carry an IANA `timezone` (default `Asia/Kuala_Lumpur`) used to expand `rrule`.
+- IDs: Sentral ids are integers. Reference ids are slugs: countries `my`/`sg`/`bn`/`id`, states `my-jhr`, `my-kul`… (get them from `GET /states`), types `masjid`/`surau`/`mini-surau` (map your own types onto these, e.g. `musolla` → `surau`, `mini surau` → `mini-surau`; anything else waits for §11).
+- `version`: an integer on every masjid and programme. It starts at 1 and goes up by 1 on every accepted write.
+- Errors: `{ "error": "<human message>", "code": "<machine_code>", "details"?: {...} }`. Codes: `unauthorized` 401, `forbidden` 403, `not_found` 404, `version_conflict` 409, `idempotency_mismatch` 409, `validation_failed` 422, `rate_limited` 429, `internal` 500.
+- Rate limit: 600 requests/min per key. On `429`, honour `Retry-After` (seconds).
+- Pagination: list endpoints take `limit` (max 100) and `cursor`, and return `next_cursor` (null at the end).
+
+## 2. Authentication and keys
+
+- One key per app, issued by the maintainers. Each key has an `app_id` (`jejak_masjid`, `qiyam`, …) and scopes: `read`, `write`, `webhook`.
+- Header: `Authorization: Bearer <api_key>`. Missing or invalid → `401`. Missing scope → `403`.
+- Rotation: a new key is issued alongside the old one, and both work for 7 days.
+
+## 3. Write headers
+
+| Header | Required on | Value |
+|---|---|---|
+| `Idempotency-Key` | POST, PATCH, DELETE | Unique per logical write (e.g. `qiyam-outbox-81723`). Same key + same body within 24 h → the original response is returned. Same key + different body → `409 idempotency_mismatch`. |
+| `If-Match` | PATCH, DELETE | The `version` you based the edit on. |
+| `X-Sentral-Actor` | POST, PATCH, DELETE | Opaque app-local user id, or `system` for jobs. Stored in the audit log so maintainers can trace and revert. Never PII (R8). |
+
+---
+
+## 4. Data model
+
+### 4.1 Masjid
+
+```json
+{
+  "id": 10234,
+  "version": 7,
+  "name": "Masjid Al-Hidayah",
+  "type_id": "masjid",
+  "lat": 3.139003,
+  "lng": 101.686855,
+  "geohash": "w283kq9",
+  "country_id": "my",
+  "state_id": "my-kul",
+  "city_id": "my-kul-kuala-lumpur",
+  "address": "Jalan ...",
+  "description": null,
+  "jumaat_available": true,
+  "telephone": "+60312345678",
+  "email": null,
+  "google_url": "https://maps.google.com/?cid=...",
+  "contacts": [{ "type": "facebook", "value": "https://facebook.com/..." }],
+  "facilities": [{ "code": "TOILET_FEMALE", "available": true }],
+  "images": [{ "url": "https://...", "is_thumbnail": true, "sort_order": 0 }],
+  "external_ids": [{ "app_id": "qiyam", "external_id": "q_5521" }],
+  "status": "active",
+  "merged_into": null,
+  "updated_by_app": "qiyam",
+  "created_at": "2026-06-11T02:00:00Z",
+  "updated_at": "2026-11-14T10:30:00Z"
+}
+```
+
+- `geohash` is computed by the server. Do not send it.
+- `contacts[].type`: `facebook`, `instagram`, `twitter`, `youtube`, `whatsapp`, `tiktok`, `threads`, `website`.
+- `facilities[].code` comes from `GET /facilities` (**NEW**). Unknown codes → `422`. A code that is absent means "unknown". `available: false` means "confirmed not available".
+- `images[].url`: a full HTTPS URL hosted by the sending app (each app keeps its own image storage; Sentral stores the URL). Send only images your own moderation has approved, and remove them from Sentral when you hide them locally.
+- `status`: `active` | `deleted` | `merged`. Deleted and merged masjids still appear in `/changes`. They are hidden from list and search.
+
+### 4.2 Programme (masjid event) — **NEW fields**
+
+```json
+{
+  "id": 88121,
+  "version": 2,
+  "masjid_id": 10234,
+  "title": "Kuliah Maghrib: Tafsir Al-Quran",
+  "description": "Kuliah mingguan ...",
+  "category": "kuliah",
+  "speaker": "Ustaz Ahmad",
+  "start_at": "2026-11-20T11:15:00Z",
+  "end_at": "2026-11-20T12:15:00Z",
+  "timezone": "Asia/Kuala_Lumpur",
+  "rrule": "FREQ=WEEKLY;BYDAY=TH",
+  "status": "active",
+  "poster_url": "https://cdn.qiyam.example/posters/abc.jpg",
+  "registration_url": null,
+  "external_ids": [{ "app_id": "qiyam", "external_id": "prog_993" }],
+  "source_app": "qiyam",
+  "updated_by_app": "qiyam",
+  "created_at": "2026-11-14T10:30:00Z",
+  "updated_at": "2026-11-14T10:31:00Z"
+}
+```
+
+- `category` (draft list, §11): `kuliah`, `ceramah`, `tazkirah`, `kelas`, `qiamullail`, `gotong_royong`, `sukan`, `majlis`, `program_belia`, `korban`, `iftar`, `jualan`, `lain` (other). Unknown → `422`. Map anything you don't have to `lain`.
+- `rrule`: RFC 5545 RRULE without the `RRULE:` prefix, or `null` for a one-off. `start_at`/`end_at` describe the first occurrence. An app that stores a series as separate dated rows MAY send each row as its own one-off programme (one `external_id` per row) instead of an `rrule`.
+- **Only public programmes sync.** Never send drafts. When a programme is unpublished, taken down by your moderation or deleted, send `DELETE`. When it is called off but should still show as cancelled, `PATCH status: cancelled` (optionally with `description` noting why).
+- `status`: `active` | `cancelled` | `completed` | `deleted`.
+- `poster_url`: an HTTPS image hosted by the sending app. Sentral stores the URL and does not proxy it. Keep the URL alive for as long as the programme is active.
+- Registration and attendance stay in each app. Sentral holds only the public programme listing.
+
+---
+
+## 5. Endpoints
+
+All require `read`. Writes also require `write`.
+
+### 5.1 Masjids
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/masjids` | List and filter (`state`, `city`, `type`, `name`, `jumaat`, `updated_since`) |
+| GET | `/masjids/nearby?lat&lng&radius` | `radius` in metres, max 20,000 |
+| GET | `/masjids/{id}` | Full record (§4.1). A merged id returns `301` with `Location` set to the survivor. |
+| GET | `/masjids/by-external/{app_id}/{external_id}` | **NEW.** Find a masjid by your own id. |
+| GET | `/masjids/match?lat&lng&name` | **NEW.** Candidates for linking, each with `score` 0–1 and `distance_m` (§9 step 2). |
+| POST | `/masjids` | Create. Body = §4.1 writable fields + `external_id`. Returns `201` + full record. Possible duplicate (≥0.9 match within 50 m) → `409 code: possible_duplicate` with `details.candidates`; resend with `?force=true` only after a person confirms it is a different place. |
+| PATCH | `/masjids/{id}` | Send only the fields you changed. `contacts`/`facilities` in a PATCH change only the listed `type`/`code` entries. Send `{ "code": "X", "available": null }` to clear one. |
+| PUT | `/masjids/{id}/external-ids/{app_id}` | **NEW.** Body `{ "external_id": "q_5521" }`. Links your id. Only your own `app_id` is allowed. Idempotent. |
+| DELETE | `/masjids/{id}` | **NEW.** Soft delete. Use it for "this place does not exist / closed for good". |
+
+### 5.2 Programmes — **NEW**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/masjids/{id}/events?from&to` | Active programmes for one masjid. Repeating programmes are returned once (expand them client-side). |
+| GET | `/events?masjid_ids=1,2,3&from&to` | Up to 100 masjids per call |
+| GET | `/events/{id}` | |
+| GET | `/events/by-external/{app_id}/{external_id}` | |
+| POST | `/masjids/{id}/events` | Create. Include `external_id`. Returns `201`. |
+| PATCH | `/events/{id}` | Changed fields only |
+| DELETE | `/events/{id}` | Sets `status: deleted` |
+
+### 5.3 Reference
+
+`GET /states?country=`, `GET /cities?state=`, `GET /facilities` (**NEW**, the facility code catalogue with `en`/`ms` labels).
+
+### 5.4 Write responses and conflicts
+
+- `200`/`201` return the full entity with its new `version`. **Store that `version` as `local.sentral_version` straight away.** That is what makes R2 skip the echo of your own write.
+- `409 version_conflict` returns `details.current` (the latest entity). Resolve it:
+  1. Work out which fields your user changed (your outbox stores `base_version` and the changed fields).
+  2. For each changed field, if `details.current` still holds the value from your base, re-send it in a new PATCH with `If-Match: current.version` and the **same** idempotency key suffixed `-r1`, `-r2`…
+  3. If the remote value changed too, **the remote value wins**. Drop your field, apply `current` locally and log the conflict. Do not loop more than 3 times.
+- `422` means a bad payload. Do not retry. Park the outbox row for a person to look at.
+- `5xx`, `429` or a network error: retry with exponential backoff (1 s → max 10 min) and keep the outbox row.
+
+---
+
+## 6. Change feed — **NEW**
+
+### 6.1 `GET /changes?after=<seq>&limit=<n>`
+
+`limit` defaults to 200, max 500. Changes come back in `seq` order, which only ever increases.
+
+```json
+{
+  "changes": [
+    {
+      "seq": 501233,
+      "entity": "masjid",
+      "entity_id": 10234,
+      "masjid_id": 10234,
+      "op": "update",
+      "version": 8,
+      "origin_app": "jejak_masjid",
+      "changed_fields": ["facilities", "telephone"],
+      "occurred_at": "2026-11-14T10:35:02Z",
+      "data": { "...": "full entity after the change, same shape as GET" }
+    }
+  ],
+  "next_after": 501233,
+  "has_more": false
+}
+```
+
+- `entity`: `masjid` | `event` (more may be added — R10).
+- `op`: `create` | `update` | `delete` | `merge`.
+- `data` is the full entity after the change. On `delete` it holds the tombstone (`status: deleted`).
+- Your own writes appear in the feed too. R2 skips them.
+- The feed is kept for 90 days. If `after` is older than that you get `410 code: cursor_expired`: run a full resync (§9 step 2), then continue from `latest_seq`.
+- `GET /changes/latest` returns `{ "latest_seq": n }`. Use it to start the cursor after your first full sync.
+
+### 6.2 Cursor
+
+Persist `next_after` **only after** you have committed the whole page locally, in the same transaction if you can. Then a crash just replays the page, and R2 makes the replay harmless.
+
+### 6.3 Applying a change (pseudo-code)
+
+```
+for change in page.changes:
+  local = find_local_by_sentral_id(change.entity, change.entity_id)
+  if local and change.version <= local.sentral_version: continue   # R2
+  if change.op == "merge": handle_merge(change); continue          # §6.4
+  if not local and change.entity == "masjid":
+      local = find_by_external_id(change.data.external_ids, my_app_id)
+             or create_local_masjid(change.data)                    # new from other app
+  upsert_local(change.data); local.sentral_version = change.version
+save_cursor(page.next_after)
+```
+
+- A programme whose masjid you have not linked yet: fetch `GET /masjids/{masjid_id}`, create or link it, then apply the programme.
+- Inbound changes MUST NOT be re-queued to your outbox. Apply them on a code path that skips your outbound hook. Otherwise you echo every change back to Sentral.
+
+### 6.4 Merge
+
+`op: "merge"`, `entity: "masjid"`, `entity_id` = the **removed** duplicate, `data.merged_into` = the survivor id. Point your local link at the survivor, then fetch the survivor. If you held both locally, merge them with your own app rules (for example, move check-ins). Programmes of the removed masjid arrive as separate `event` `update` changes with the new `masjid_id`.
+
+---
+
+## 7. Webhooks — **NEW**
+
+- Register once with the maintainers: an HTTPS URL plus your key's `webhook` scope. You receive a shared secret `whsec_…`.
+- Sentral POSTs a thin ping within seconds of each committed write by **another** app:
+
+```
+POST <your url>
+Content-Type: application/json
+X-Sentral-Signature: t=1763116502,v1=5f2c…
+X-Sentral-Delivery: dlv_01JD…
+
+{ "type": "changes.available", "latest_seq": 501233 }
+```
+
+- Verify: `v1 == hex(HMAC_SHA256(secret, t + "." + raw_body))` with a constant-time compare, and `|now - t| <= 300` s. Fail → `401`, do nothing.
+- Respond `2xx` within 5 s. Do the pull asynchronously (queue or background job). Do not pull inside the request.
+- Retries: 1 m, 5 m, 30 m, 2 h, 6 h, then the delivery is dropped. Dropped pings are harmless because the scheduled pull catches up (R6). Pings may arrive twice or out of order. The ping carries no data on purpose.
+
+---
+
+## 8. Ownership and moderation
+
+- Any app key with `write` may edit any masjid or programme. Writes go live straight away for every app.
+- Each app moderates its **own users** before sending (R7): reports, review queues, trust levels, photo rules. Sentral does not re-moderate.
+- Every write is audited (`app_id`, `X-Sentral-Actor`, before/after, time). Maintainers can revert a change. A revert arrives in your feed as a normal `update` with a higher `version`.
+- Programmes: you MAY edit a programme created by another app (for example, to cancel it). Prefer leaving another app's programme alone unless your user is that masjid's committee.
+- Abuse from one app's users is that app's responsibility. Its key can be suspended.
+
+---
+
+## 9. Build order for your agent
+
+1. **Schema in your app.** Add to your masjid table: `sentral_id INTEGER UNIQUE NULL` and `sentral_version INTEGER NOT NULL DEFAULT 0`. Add the same two columns to your programme table. Add a table `sentral_outbox(id, entity, local_id, sentral_id, op, payload_json, base_version, attempts, next_attempt_at, last_error, status)` and a table `sentral_cursor(last_seq)`.
+2. **Initial link (one-off job, resumable).** No links exist yet: the 11,429 Sentral masjids were loaded from Qiyam's and JM's datasets (`source` = `qiyam` / `jejak_masjid`), but no app id was kept, and the loader merged anything within 500 m regardless of name. Expect some Sentral rows to stand for two of your places. **Links are one-to-one:** if a Sentral row is already linked to another of your masjids, do not link a second one; send both to the review list. For each local masjid without `sentral_id`:
+   - `GET /masjids/by-external/{you}/{local_id}`. Found → link.
+   - Else `GET /masjids/match?lat&lng&name`. If the top candidate has `score ≥ 0.9` and `distance_m ≤ 50` → `PUT /masjids/{id}/external-ids/{you}`, then link.
+   - Else if the top candidate has `score ≥ 0.6` → write it to a review list for a person. Do not auto-link.
+   - Else `POST /masjids` with `external_id`, then link.
+   - After linking, set `sentral_version` from the returned record and decide per field: Sentral's value wins unless the Sentral field is empty and yours is not. In that case, queue a PATCH.
+   - Programmes: link or create the same way, using `/events/by-external`.
+   - When done: `GET /changes/latest` → save as the cursor.
+3. **Outbound.** At every place your app commits a masjid-detail or programme change (after your own moderation), insert an outbox row in the same transaction. A worker drains the outbox (§5.4).
+4. **Inbound pull.** A job that loops `GET /changes?after=cursor` until `has_more: false`, applying §6.3. Schedule it every ≤15 min. Also trigger it from the webhook.
+5. **Webhook receiver** (§7).
+6. **Reads.** Your app may keep reading its local copy. Use Sentral reads for linking, backfill and checks. Do not proxy end-user traffic through Sentral.
+
+## 10. Acceptance checks (all must pass against staging)
+
+1. A request without a key → `401`. A request with a read-only key on POST → `403`.
+2. Link job: a masjid that exists in Sentral is linked, not duplicated. Re-running the job creates nothing new.
+3. Edit a facility in your app → it appears in `GET /masjids/{id}` within 1 min. Your own `/changes` entry is skipped (local `sentral_version` already equals it).
+4. Another key edits the same masjid → your webhook fires → your local copy updates within 1 min.
+5. Webhook with a bad signature, or a `t` older than 5 min → rejected, no pull.
+6. Webhooks disabled → the scheduled pull still applies the change within 15 min.
+7. Replay the same `/changes` page twice → no duplicate rows and no version going backwards.
+8. Two apps PATCH the same field from the same base → one wins, the other gets `409`, resolves it per §5.4, and both apps end on the same value.
+9. Same `Idempotency-Key` sent twice → one write, identical responses.
+10. Merge of masjid A into B → your links move to B and A's programmes show under B.
+11. Create, cancel and delete a programme in one app → the other app shows it, then shows it as cancelled, then hides it.
+12. Your logs and payloads contain no user name, email or phone (only the masjid's own public contacts).
+
+## 11. Open items (maintainers, not your agent)
+
+- Final facility code catalogue (both apps' codes to be merged into `GET /facilities`).
+- Final programme `category` list (§4.2 is the union of both apps' lists).
+- Masjid types: JM also has `institution` (university, hospital, office prayer spaces). Add it or map it to `surau`.
+- Facility state: JM tracks confirmed / unconfirmed / disputed per facility; Sentral has only available yes / no / unknown. Agree which states count as `true`.
+- Sentral server prerequisites before any key is issued: remove the dev test key seeded in migration `002_api_keys.sql`, and confirm what the prod D1 holds.
+- Staging URL, key issue and webhook registration.
+- Data licence: each app's terms must allow user-contributed masjid and programme data to be shared with the partner app.
