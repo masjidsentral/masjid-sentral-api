@@ -104,3 +104,27 @@ export async function getMasjid(id: number): Promise<MasjidJson> {
   const res = await SELF.fetch(`${BASE}/masjids/${id}`, { headers: readHeaders() })
   return res.json() as Promise<MasjidJson>
 }
+
+/** A point `n` * ~5.5 km north of a base, so tests in one file do not see each other's masjids. */
+export function spot(n: number, dLatM = 0, dLngM = 0): { lat: number; lng: number } {
+  return { lat: 1.2 + n * 0.05 + dLatM / 111_000, lng: 103.5 + dLngM / 111_000 }
+}
+
+export async function api(
+  method: string,
+  path: string,
+  opts: { token?: string; body?: unknown; ifMatch?: number | string; idemKey?: string; noIdem?: boolean; actor?: string } = {},
+): Promise<Response> {
+  const { SELF } = await import('cloudflare:test')
+  const extra: Record<string, string> = {}
+  if (opts.ifMatch !== undefined) extra['If-Match'] = String(opts.ifMatch)
+  if (opts.idemKey) extra['Idempotency-Key'] = opts.idemKey
+  const headers = writeHeaders(opts.token ?? KEYS.jm.token, opts.actor ?? 'user-1', extra)
+  if (opts.noIdem) delete headers['Idempotency-Key']
+  const isRead = method === 'GET'
+  return SELF.fetch(`${BASE}${path}`, {
+    method,
+    headers: isRead ? bearer(opts.token ?? KEYS.read.token) : headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  })
+}

@@ -33,7 +33,7 @@ describe('create', () => {
     expect(m.version).toBe(1)
     expect(m.updated_by_app).toBe('jejak_masjid')
     expect(m.geohash).toHaveLength(9)
-    expect(m.lat).toBe(MASJID_BODY.lat) // stored unrounded (contract R9)
+    expect(m.lat).toBe(5.4141) // stored unrounded (contract R9)
     expect(m.status).toBe('active')
     expect(m.created_at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/)
 

@@ -115,7 +115,7 @@ export const CANDIDATE_RADIUS_M = 1000
 
 /**
  * Active masjids within 1 km of the point, scored against `name` and sorted best first
- * (ties: nearer, then lower id). Uses the geohash index, then haversine. Callers slice the top N.
+ * (ties: nearer, then lower id). Uses the geohash index, then haversine. Returns the best 50 (callers slice the top N).
  */
 export async function findCandidates(
   db: D1Database,
