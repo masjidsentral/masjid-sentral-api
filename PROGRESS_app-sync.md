@@ -45,3 +45,42 @@ Deferred: everything in S2–S4.
 - S1 must not ship to prod alone: reads now need keys, so existing keyless consumers break.
 - `web/` dev portal still documents keyless reads (owner, out of scope).
 - Confirm the `RATE_LIMITER` `namespace_id` ("1001" is a placeholder) is valid for the Sentral Cloudflare account.
+
+## S2 — Schema, versions, change log, webhooks (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
+
+Commits
+- `masjidsentral-db-schema`: 19038ee `feat(sync): 004 app sync schema ...`
+- `api`: e2ae750 (pipeline, entities, /changes, webhooks, admin webhooks, v1.0 handlers on the new schema, cron), plus a tests + progress commit after it.
+
+Built
+- `004_app_sync.sql` (DESTRUCTIVE header at top): drops/recreates the masjid tables; new `masjids` (version, updated_by_app, merged_into, status active|deleted|merged, no `source`), `masjid_images.url`, `masjid_facilities(code, available)`, `masjid_contacts` (8 types, unique per type), `masjid_events` (v1.1 shape, `masjid_event_images` dropped), `masjid_external_ids`, `event_external_ids`, `facility_catalogue` (provisional seed, 30 rows: JM's 29 codes + retired `OKU_FRIENDLY` inactive), `changes`, `idempotency_keys`, `webhook_subscriptions`, `webhook_deliveries`. Timestamp defaults are now ISO `...Z`. 001-003 untouched.
+- `src/lib/write.ts`: `beginWrite()` (Idempotency-Key 422, If-Match 422 for PATCH/DELETE, request hash = SHA-256 of method + path + query + body, replay / 409 `idempotency_mismatch`) and `commitWrite()` / `runCommit()` (atomic batch, below). Replays carry `Idempotent-Replay: true`. Expired rows (>24 h) free their key.
+- `src/lib/entities.ts` (contract §4.1 entity + loader), `src/lib/webhooks.ts` (HMAC signing/verify, dispatch with lease + backoff, idempotency sweep), `src/routes/changes.ts` (`GET /changes`, `/changes/latest`; needs `read`), `src/routes/admin.ts` (`POST/GET/DELETE /admin/webhooks`), cron `* * * * *` in `wrangler.jsonc`, `scheduled` exported next to `fetch` (default export is now `{ fetch, scheduled }`; the Hono app is the named export `app`, tests updated).
+- v1.0 handlers (`list`, `nearby`, `detail`, `POST`, `PATCH`) adapted to the new schema; POST/PATCH go through the pipeline.
+
+Atomicity (spec 3.2.3)
+- Cloudflare docs: a D1 `batch()` is one SQL transaction, statements run sequentially and non-concurrently, any failure rolls the whole batch back.
+- Order in the batch: (1) guarded `UPDATE ... WHERE id = ? AND version = ?`; (2) `INSERT INTO changes ... SELECT ... WHERE changes() = 1`; (3) `INSERT INTO idempotency_keys ... SELECT ... WHERE changes() = 1`; (4) child rows and (5) the webhook enqueue, each guarded by `EXISTS (idempotency row of this request)`.
+- Why not `changes()` for everything (the spec's suggestion): a child statement can legitimately affect 0 rows (e.g. replacing an empty image list), which would break a changes() chain. After step 3 the idempotency row (a row written only by a winner) is the guard, so it is exact.
+- `meta.changes` of statement 1 tells the handler the outcome (0 = lost: 409 with `details.current`, nothing persisted, no idempotency row).
+- Create: the id is unknown in JS, so `changes`/idempotency JSON use `json_set(?, '$.id', last_insert_rowid())`; children use the id of the `changes` row just inserted (via `sqlite_sequence`).
+- Proof: `tests/sync-write.test.ts`: HTTP race (`Promise.all` of two PATCHes: one 200, one 409 with `details.current`, one `changes` row, loser's idempotency row absent, loser's images not persisted); a deterministic test that commits a stale spec straight through `runCommit` (bypassing the handler's early check) and shows no change row, idempotency row, child rows or webhook delivery from the loser; a `changes()`-inside-batch semantics test; a rollback test (idempotency PK collision rolls back the entity write). Two requests sharing one Idempotency-Key are answered from the winner's stored response.
+
+Interpretations / deviations
+1. Webhook enqueue is inside the same batch (atomic with the write) instead of "after commit"; dispatch still runs after, via `waitUntil`. Own-app exclusion compares the subscription key's `app_id` with the writer's.
+2. Only 200/201 successes are stored for idempotency (409/422 never). The request hash includes the query string.
+3. `GET /masjids/:id` now returns exactly the contract entity (so `changes.data` equals GET). Dropped from v1.0: `reviews`, `events`, `avg_rating`, `review_count`, per-image `thumbnail_url`/`full_url`. List `thumbnail_url` is now the stored image URL. List/nearby rows keep integer `jumaat_available` (S3 reshapes). Merged id -> 301, deleted -> 200 tombstone (spec 4.8, done now since it is one branch).
+4. POST needs `Idempotency-Key`; `source` is gone (ignored if sent). POST/PATCH accept `images` (https URLs, full replace) so child writes have a real consumer. `contacts`, `facilities`, `external_id` on POST/PATCH are ignored until S3. type/state/country/city ids are validated (422).
+5. A PATCH that changes nothing still bumps the version (contract: +1 per accepted write); `changed_fields` lists only fields whose value actually changed. PATCH on a non-active masjid is 404.
+6. `facility_catalogue`: JM's 0089 migration is the only `INSERT INTO facility` in `develop` (production drifted; earlier codes were seeded elsewhere), so the seed is 0089's 29 codes + `OKU_FRIENDLY` (inactive, documented as legacy there). JM's four flag-gated codes (KOLAH, ZAKAT_COUNTER, WIFI, COMMUNITY_KITCHEN) are active here. Malay labels are my draft translations: owner/Qiyam to review.
+7. `/admin/webhooks`: the target key must be active, have an `app_id` and the `webhook` scope (else 422). `DELETE` removes the subscription and its delivery row (204). Added `GET /admin/webhooks` (never shows secrets). The secret (`whsec_` + 64 hex) is stored in plaintext in D1 (HMAC needs it).
+8. No `410 cursor_expired`: nothing is pruned in v1.1, so it cannot occur yet.
+9. The spec's `INSERT ... WHERE changes() = 1` suggestion is only safe for the first two follow-ups; see Atomicity.
+10. `../masjidsentral-db-schema/migrations/002_api_keys.sql` shows as untracked in that repo (pre-existing, I did not touch it). Owner may want to commit it.
+
+Deferred: all of S3, S4 (events/external-id endpoints, merge, revert, scans, openapi v1.1, README), `loadEvent` for event conflicts (event handlers pass `loadCurrent` in S3).
+
+Deploy notes
+- Apply 004 after 003 and **before** deploying the Worker (take a Time Travel bookmark first; 004 empties all masjid data). Deploy registers the per-minute cron trigger.
+- Webhook registration after deploy: `POST /admin/webhooks { api_key_id, url }` with the admin key (the target key needs the `webhook` scope and an `app_id`).
+- Webhook dispatch runs on the free plan within 50 outbound fetches per run (limit 50 rows) plus a handful of D1 calls.
