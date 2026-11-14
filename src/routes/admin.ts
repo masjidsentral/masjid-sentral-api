@@ -8,6 +8,7 @@ import { getActor, type AppEnv } from '../middleware/auth'
 import { loadMasjidsByIds } from '../lib/entities'
 import { adminCtx, buildMergeSpecs, buildRevertSpecs } from '../lib/admin'
 import { decodeCursor, encodeCursor, intParam } from '../lib/page'
+import { scanStatus } from '../lib/scan'
 import { isoNow } from '../lib/time'
 import { beginWrite, commitWrite, parseJsonObject, replayOnConflict, type WriteCtx } from '../lib/write'
 
@@ -113,7 +114,7 @@ function parseReason(body: Record<string, unknown>): string | null {
 // POST /admin/masjids/:id/merge { into, reason }: the masjid in the path is the duplicate that is removed.
 adminRouter.post('/masjids/:id/merge', async (c) => {
   const loserId = parseIdParam(c.req.param('id'))
-  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  const begin = await beginWrite(c, { requireIfMatch: false })
   if ('replay' in begin) return begin.replay
   const ctx: WriteCtx = begin.ctx
   return replayOnConflict(ctx, async () => {
@@ -127,12 +128,18 @@ adminRouter.post('/masjids/:id/merge', async (c) => {
 // POST /admin/changes/:seq/revert: applies the change's before_json as a new write (actor "revert:<seq>").
 adminRouter.post('/changes/:seq/revert', async (c) => {
   const seq = parseIdParam(c.req.param('seq'), 'seq')
-  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  const forceRaw = c.req.query('force')
+  if (forceRaw !== undefined && forceRaw !== 'true' && forceRaw !== 'false') fail('force must be true or false', 'force')
+  const begin = await beginWrite(c, { requireIfMatch: false })
   if ('replay' in begin) return begin.replay
   const ctx: WriteCtx = begin.ctx
   return replayOnConflict(ctx, async () => {
     try {
-      return await commitWrite(c, adminCtx(ctx, `revert:${seq}`), await buildRevertSpecs(ctx, seq, isoNow()))
+      return await commitWrite(
+        c,
+        adminCtx(ctx, `revert:${seq}:${ctx.actor}`),
+        await buildRevertSpecs(ctx, seq, isoNow(), { force: forceRaw === 'true' }),
+      )
     } catch (err) {
       if (!(err instanceof ApiError) && String(err instanceof Error ? err.message : err).includes('UNIQUE')) {
         throw new ApiError(409, 'already_linked', 'An external id from the logged state now belongs to another entity')
@@ -207,23 +214,33 @@ async function loadDuplicate(db: D1Database, id: number): Promise<DuplicateRow> 
 // POST /admin/duplicates/:id/dismiss: "these are different places". Dismissing twice is a no-op.
 adminRouter.post('/duplicates/:id/dismiss', async (c) => {
   const id = parseIdParam(c.req.param('id'))
+  const begin = await beginWrite(c, { requireIfMatch: false })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+  const now = isoNow()
   const res = await c.env.DB
-    .prepare("UPDATE duplicate_candidates SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'pending'")
-    .bind(isoNow(), id)
+    .prepare("UPDATE duplicate_candidates SET status = 'dismissed', resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'")
+    .bind(now, ctx.actor, id)
     .run()
   const row = await loadDuplicate(c.env.DB, id)
   if ((res.meta.changes ?? 0) === 0 && row.status !== 'dismissed') {
     throw new ApiError(422, 'validation_failed', `This pair is already ${row.status}`, { reason: 'not_pending', status: row.status })
   }
-  return c.json((await duplicateView(c.env.DB, [row]))[0])
+  const view = (await duplicateView(c.env.DB, [row]))[0]
+  // Store the response so a double-sent dismiss replays instead of re-running (the action is idempotent anyway).
+  await c.env.DB
+    .prepare(
+      `INSERT OR IGNORE INTO idempotency_keys (api_key_id, key, request_hash, response_status, response_json, created_at)
+       VALUES (?, ?, ?, 200, ?, ?)`,
+    )
+    .bind(ctx.keyId, ctx.idemKey, ctx.requestHash, JSON.stringify(view), now)
+    .run()
+  return c.json(view)
 })
 
-// POST /admin/duplicates/:id/merge { into }: `into` must be masjid_a or masjid_b; the other one is merged into it.
-// Same write as POST /admin/masjids/:id/merge; the queue row becomes `merged` in the same batch and every other
-// pending row involving the removed masjid becomes `dismissed`.
 adminRouter.post('/duplicates/:id/merge', async (c) => {
   const id = parseIdParam(c.req.param('id'))
-  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  const begin = await beginWrite(c, { requireIfMatch: false })
   if ('replay' in begin) return begin.replay
   const ctx: WriteCtx = begin.ctx
   return replayOnConflict(ctx, async () => {
@@ -242,3 +259,5 @@ adminRouter.post('/duplicates/:id/merge', async (c) => {
     return commitWrite(c, adminCtx(ctx), await buildMergeSpecs(ctx, loser, into, parseReason(body), isoNow()))
   })
 })
+
+adminRouter.get('/scan', async (c) => c.json(await scanStatus(c.env.DB)))

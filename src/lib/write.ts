@@ -68,6 +68,8 @@ export interface WriteSpec {
   status: 200 | 201
   /** Extra top-level keys recorded in changes.after_json only (e.g. `forced: true`); never in the response. */
   changeExtra?: Record<string, unknown>
+  /** Free text an admin attached; stored in changes.admin_note, never in after_json and never returned by /changes. */
+  adminNote?: string | null
   /** Override the change's origin_app (admin writes use "sentral_admin"). */
   originApp?: string
   /**
@@ -223,7 +225,7 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
   const stmts: D1PreparedStatement[] = []
   const entityIdx: number[] = []
   const respondIndex = Math.max(0, specs.findIndex(sp => sp.respond))
-  const changeCols = 'entity, entity_id, masjid_id, op, version, origin_app, actor, changed_fields, before_json, after_json, occurred_at'
+  const changeCols = 'entity, entity_id, masjid_id, op, version, origin_app, actor, changed_fields, before_json, after_json, occurred_at, admin_note'
 
   specs.forEach((spec, index) => {
     const isCreate = spec.op === 'create'
@@ -256,8 +258,8 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
     }
     stmts.push(
       db.prepare(
-        `INSERT INTO changes (${changeCols}) VALUES (?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ${afterExpr}, ?)`,
-      ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, changeAfterJson, now),
+        `INSERT INTO changes (${changeCols}) VALUES (?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ${afterExpr}, ?, ?)`,
+      ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, changeAfterJson, now, spec.adminNote ?? null),
     )
     if (index === respondIndex) {
       // The stored response is the first entity (the primary one).

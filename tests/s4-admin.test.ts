@@ -111,9 +111,17 @@ describe('POST /admin/masjids/:id/merge', () => {
     const list = await SELF.fetch(`${BASE}/masjids/${survivor.id}/events`, { headers: bearer(KEYS.read.token) })
     expect(((await list.json()) as { data: Ent[] }).data.map(e => e.id).sort()).toEqual([e1.id, e2.id].sort())
 
-    // Change order in the feed: survivor, then loser, then events.
-    const seqs = [sc.seq, lc.seq, (await changes('event', e1.id)).at(-1)!.seq]
+    // Change order in the feed: loser merge, then the moved programmes, then the survivor update.
+    const seqs = [lc.seq, (await changes('event', e1.id)).at(-1)!.seq, (await changes('event', e2.id)).at(-1)!.seq, sc.seq]
     expect(seqs).toEqual([...seqs].sort((a, b) => a - b))
+
+    // L3: the admin's reason is kept out of the feed (after_json, /changes data) and stored in admin_note.
+    expect(lafter.reason).toBeUndefined()
+    expect(lc.admin_note).toBe('same place')
+    const feed = await (await SELF.fetch(`${BASE}/changes?after=${lc.seq - 1}&limit=1`, { headers: bearer(KEYS.read.token) })).text()
+    expect(feed).not.toContain('same place')
+    expect(feed).not.toContain('admin_note')
+    expect(feed).not.toContain('"reason"')
   })
 
   it('replays the same Idempotency-Key and refuses a second merge', async () => {
@@ -247,7 +255,7 @@ describe('POST /admin/changes/:seq/revert', () => {
     expect(now).toEqual(after)
 
     const c = (await changes('masjid', m.id)).at(-1)!
-    expect(c).toMatchObject({ op: 'update', actor: `revert:${seq}`, origin_app: 'sentral_admin' })
+    expect(c).toMatchObject({ op: 'update', actor: `revert:${seq}:admin-1`, origin_app: 'sentral_admin' })
     expect(JSON.parse(c.changed_fields)).toEqual(expect.arrayContaining(['name', 'description', 'lat', 'geohash', 'contacts', 'facilities', 'images']))
     expect(JSON.parse(c.after_json)).toEqual(now)
   })
@@ -294,9 +302,9 @@ describe('POST /admin/changes/:seq/revert', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ id: m.id, status: 'deleted', version: m.version + 1 })
     const c = (await changes('masjid', m.id)).at(-1)!
-    expect(c).toMatchObject({ op: 'delete', actor: `revert:${createSeq}` })
+    expect(c).toMatchObject({ op: 'delete', actor: `revert:${createSeq}:admin-1` })
     const evc = (await changes('event', ev.id)).at(-1)!
-    expect(evc).toMatchObject({ op: 'delete', actor: `revert:${createSeq}` })
+    expect(evc).toMatchObject({ op: 'delete', actor: `revert:${createSeq}:admin-1` })
     // already deleted: refused
     expect((await revert(createSeq)).status).toBe(422)
   })
@@ -320,7 +328,7 @@ describe('POST /admin/changes/:seq/revert', () => {
     expect(strip(back)).toEqual(strip(full))
     expect(back.status).toBe('active')
     expect(back.version).toBe(full.version + 2)
-    expect((await changes('masjid', m.id)).at(-1)).toMatchObject({ op: 'update', actor: `revert:${delSeq}` })
+    expect((await changes('masjid', m.id)).at(-1)).toMatchObject({ op: 'update', actor: `revert:${delSeq}:admin-1` })
     const deletedAt = await env.DB.prepare('SELECT deleted_at FROM masjids WHERE id = ?').bind(m.id).first<{ deleted_at: string | null }>()
     expect(deletedAt!.deleted_at).toBeNull()
     const evRow = await env.DB.prepare('SELECT status FROM masjid_events WHERE id = ?').bind(ev.id).first<{ status: string }>()
@@ -388,7 +396,7 @@ describe('POST /admin/changes/:seq/revert', () => {
     const restored = await (await SELF.fetch(`${BASE}/events/${ev.id}`, { headers: bearer(KEYS.read.token) })).json() as Ent
     expect(restored).toMatchObject({ title: 'Original', category: 'kuliah', status: 'active', version: upd.version + 1, updated_by_app: 'sentral_admin' })
     expect(restored.external_ids).toEqual([{ app_id: 'jejak_masjid', external_id: 'p-1' }])
-    expect((await changes('event', ev.id)).at(-1)).toMatchObject({ op: 'update', actor: `revert:${updSeq}` })
+    expect((await changes('event', ev.id)).at(-1)).toMatchObject({ op: 'update', actor: `revert:${updSeq}:admin-1` })
 
     // delete then revert the delete
     expect((await api('DELETE', `/events/${ev.id}`, { ifMatch: restored.version })).status).toBe(200)
@@ -402,7 +410,7 @@ describe('POST /admin/changes/:seq/revert', () => {
     const del = await revert(createSeq)
     expect(del.status).toBe(200)
     expect(await del.json()).toMatchObject({ id: ev.id, status: 'deleted' })
-    expect((await changes('event', ev.id)).at(-1)).toMatchObject({ op: 'delete', actor: `revert:${createSeq}` })
+    expect((await changes('event', ev.id)).at(-1)).toMatchObject({ op: 'delete', actor: `revert:${createSeq}:admin-1` })
   })
 
   it('refuses a programme revert when its masjid is no longer active', async () => {
@@ -422,5 +430,168 @@ describe('POST /admin/changes/:seq/revert', () => {
     for (const token of [KEYS.jm.token, KEYS.read.token]) {
       expect((await revert(seq, { token })).status).toBe(403)
     }
+  })
+})
+
+// ─── S4 review fixes ─────────────────────────────────────────────────────────
+
+describe('field-level revert (H1)', () => {
+  it('reverting a name PATCH keeps a link another app added afterwards', async () => {
+    const m = await mkMasjid(70, { external_id: 'h1-jm' })
+    const v1 = await getMasjid(m.id)
+    expect((await patchMasjid(m.id, v1.version, { name: 'Renamed H1' })).status).toBe(200)
+    const nameSeq = await lastSeq('masjid', m.id)
+    expect((await putLink(m.id, KEYS.qiyam.token, 'qiyam', 'q-h1')).status).toBe(200)
+
+    const res = await revert(nameSeq)
+    expect(res.status).toBe(200)
+    const now = await getMasjid(m.id)
+    expect(now.name).toBe('Masjid S4 70')
+    expect(now.external_ids).toEqual([{ app_id: 'jejak_masjid', external_id: 'h1-jm' }, { app_id: 'qiyam', external_id: 'q-h1' }])
+    const c = (await changes('masjid', m.id)).at(-1)!
+    expect(JSON.parse(c.changed_fields)).toEqual(['name'])
+  })
+
+  it('reverting a pre-merge survivor change leaves the ids the merge moved in (stale unless forced; delta only)', async () => {
+    const survivor = await mkMasjid(71, { external_id: 'h1-s' })
+    const loser = await mkMasjid(72, { external_id: 'h1-l' })
+    expect((await putLink(survivor.id, KEYS.qiyam.token, 'qiyam', 'q-s')).status).toBe(200)
+    const linkSeq = await lastSeq('masjid', survivor.id)
+    expect((await merge(loser.id, { into: survivor.id })).status).toBe(200)
+
+    // The merge's update touched external_ids after the link change: stale.
+    const stale = await revert(linkSeq)
+    expect(stale.status).toBe(422)
+    const body = await stale.json() as Err
+    expect(body.code).toBe('stale_revert')
+    expect(body.details!.later_seqs).toEqual([await lastSeq('masjid', survivor.id)])
+    expect((await getMasjid(survivor.id)).external_ids).toHaveLength(3)
+
+    // Forced: only the id that change added (q-s) goes; the moved id and the original stay.
+    const forced = await api('POST', `/admin/changes/${linkSeq}/revert?force=true`, { token: admin, body: {}, actor: 'admin-1' })
+    expect(forced.status).toBe(200)
+    expect((await getMasjid(survivor.id)).external_ids).toEqual([
+      { app_id: 'jejak_masjid', external_id: 'h1-l' },
+      { app_id: 'jejak_masjid', external_id: 'h1-s' },
+    ])
+    const c = (await changes('masjid', survivor.id)).at(-1)!
+    expect(JSON.parse(c.after_json).forced).toBe(true)
+  })
+
+  it('a later change to the same field is stale; to another field it is not; force overrides', async () => {
+    const m = await mkMasjid(73, { description: 'zero' })
+    await patchMasjid(m.id, m.version, { description: 'one' })
+    const firstSeq = await lastSeq('masjid', m.id)
+    const cur = await getMasjid(m.id)
+    await patchMasjid(m.id, cur.version, { description: 'two' })
+    const secondSeq = await lastSeq('masjid', m.id)
+
+    const stale = await revert(firstSeq)
+    expect(stale.status).toBe(422)
+    expect(await stale.json()).toMatchObject({ code: 'stale_revert', details: { later_seqs: [secondSeq] } })
+
+    const ok = await api('POST', `/admin/changes/${firstSeq}/revert?force=true`, { token: admin, body: {}, actor: 'admin-1' })
+    expect(ok.status).toBe(200)
+    expect((await getMasjid(m.id)).description).toBe('zero')
+
+    // other field: not stale
+    const now = await getMasjid(m.id)
+    await patchMasjid(m.id, now.version, { name: 'Other field' })
+    const nameSeq = await lastSeq('masjid', m.id)
+    const cur2 = await getMasjid(m.id)
+    await patchMasjid(m.id, cur2.version, { description: 'three' })
+    expect((await revert(nameSeq)).status).toBe(200)
+    expect((await getMasjid(m.id)).description).toBe('three')
+  })
+
+  it('a programme revert restores only the listed fields', async () => {
+    const m = await mkMasjid(74)
+    const ev = await mkEvent(m.id, { title: 'Before' })
+    await api('PATCH', `/events/${ev.id}`, { ifMatch: ev.version, body: { title: 'After' } })
+    const titleSeq = await lastSeq('event', ev.id)
+    const cur = await (await SELF.fetch(`${BASE}/events/${ev.id}`, { headers: bearer(KEYS.read.token) })).json() as Ent
+    await api('PATCH', `/events/${ev.id}`, { ifMatch: cur.version, body: { category: 'ceramah' } })
+    expect((await revert(titleSeq)).status).toBe(200)
+    const now = await (await SELF.fetch(`${BASE}/events/${ev.id}`, { headers: bearer(KEYS.read.token) })).json() as Ent
+    expect(now).toMatchObject({ title: 'Before', category: 'ceramah' })
+  })
+})
+
+describe('admin idempotency and queue hygiene (L4)', () => {
+  const noKey = (path: string, body: unknown = {}) => api('POST', path, { token: admin, body, actor: 'admin-1', noIdem: true })
+
+  it('merge, revert and dismiss require an Idempotency-Key', async () => {
+    const a = await mkMasjid(75)
+    const b = await mkMasjid(76)
+    expect((await noKey(`/admin/masjids/${a.id}/merge`, { into: b.id })).status).toBe(422)
+    expect((await noKey(`/admin/changes/${await lastSeq('masjid', a.id)}/revert`)).status).toBe(422)
+    expect((await noKey('/admin/duplicates/1/dismiss')).status).toBe(422)
+    expect((await getMasjid(a.id)).status).toBe('active')
+  })
+
+  it('a double-sent revert applies once', async () => {
+    const m = await mkMasjid(77, { description: 'x' })
+    await patchMasjid(m.id, m.version, { description: 'y' })
+    const seq = await lastSeq('masjid', m.id)
+    const key = `rv-${crypto.randomUUID()}`
+    const one = await api('POST', `/admin/changes/${seq}/revert`, { token: admin, body: {}, actor: 'admin-1', idemKey: key })
+    const two = await api('POST', `/admin/changes/${seq}/revert`, { token: admin, body: {}, actor: 'admin-1', idemKey: key })
+    expect(one.status).toBe(200)
+    expect(two.headers.get('Idempotent-Replay')).toBe('true')
+    expect((await changes('masjid', m.id)).filter(c => c.actor === `revert:${seq}:admin-1`)).toHaveLength(1)
+  })
+
+  it('merge re-points the loser\'s other pending pairs to the survivor and flattens chains', async () => {
+    const survivor = await mkMasjid(78)
+    const loser = await mkMasjid(79)
+    const third = await mkMasjid(80)
+    const ins = (a: number, b: number) => env.DB
+      .prepare("INSERT INTO duplicate_candidates (masjid_a, masjid_b, score, distance_m) VALUES (?, ?, 0.9, 40)")
+      .bind(Math.min(a, b), Math.max(a, b))
+    await env.DB.batch([ins(loser.id, survivor.id), ins(loser.id, third.id)])
+
+    // An older tombstone points at the loser: after the merge it points at the survivor.
+    const old = await mkMasjid(81)
+    await env.DB.prepare("UPDATE masjids SET status = 'merged', merged_into = ? WHERE id = ?").bind(loser.id, old.id).run()
+
+    expect((await merge(loser.id, { into: survivor.id })).status).toBe(200)
+
+    const rows = (await env.DB.prepare('SELECT masjid_a, masjid_b, status, resolved_by FROM duplicate_candidates WHERE masjid_a IN (?, ?, ?) OR masjid_b IN (?, ?, ?)')
+      .bind(loser.id, survivor.id, third.id, loser.id, survivor.id, third.id).all<Record<string, any>>()).results
+    const find = (a: number, b: number) => rows.filter(r => r.masjid_a === Math.min(a, b) && r.masjid_b === Math.max(a, b))
+    expect(find(loser.id, survivor.id)[0]).toMatchObject({ status: 'merged', resolved_by: 'admin-1' })
+    expect(find(loser.id, third.id)[0]).toMatchObject({ status: 'dismissed', resolved_by: 'admin-1' })
+    expect(find(survivor.id, third.id)).toEqual([expect.objectContaining({ status: 'pending' })])
+
+    const tomb = await env.DB.prepare('SELECT merged_into, version FROM masjids WHERE id = ?').bind(old.id).first<{ merged_into: number; version: number }>()
+    expect(tomb!.merged_into).toBe(survivor.id)
+    const redirect = await SELF.fetch(`${BASE}/masjids/${old.id}`, { headers: bearer(KEYS.read.token), redirect: 'manual' })
+    expect(redirect.headers.get('location')).toBe(`/masjids/${survivor.id}`)
+  })
+
+  it('deleting a masjid (DELETE or revert-of-create) dismisses its pending pairs; dismiss records the actor', async () => {
+    const a = await mkMasjid(82)
+    const b = await mkMasjid(83)
+    const c = await mkMasjid(84)
+    const ins = (x: number, y: number) => env.DB
+      .prepare("INSERT INTO duplicate_candidates (masjid_a, masjid_b, score, distance_m) VALUES (?, ?, 0.9, 40)")
+      .bind(Math.min(x, y), Math.max(x, y))
+    await env.DB.batch([ins(a.id, b.id), ins(b.id, c.id)])
+    expect((await api('DELETE', `/masjids/${a.id}`, { ifMatch: a.version })).status).toBe(200)
+    const ab = await env.DB.prepare('SELECT status, resolved_at FROM duplicate_candidates WHERE masjid_a = ? AND masjid_b = ?').bind(Math.min(a.id, b.id), Math.max(a.id, b.id)).first<Record<string, any>>()
+    expect(ab).toMatchObject({ status: 'dismissed' })
+    expect(ab!.resolved_at).toBeTruthy()
+
+    const createSeq = (await changes('masjid', b.id))[0].seq
+    expect((await revert(createSeq)).status).toBe(200)
+    const bc = await env.DB.prepare('SELECT id, status FROM duplicate_candidates WHERE masjid_a = ? AND masjid_b = ?').bind(Math.min(b.id, c.id), Math.max(b.id, c.id)).first<{ id: number; status: string }>()
+    expect(bc!.status).toBe('dismissed')
+
+    const d = await mkMasjid(85)
+    const e = await mkMasjid(86)
+    await ins(d.id, e.id).run()
+    const row = await env.DB.prepare('SELECT id FROM duplicate_candidates WHERE masjid_a = ? AND masjid_b = ?').bind(Math.min(d.id, e.id), Math.max(d.id, e.id)).first<{ id: number }>()
+    expect((await api('POST', `/admin/duplicates/${row!.id}/dismiss`, { token: admin, body: {}, actor: 'admin-7' })).status).toBe(200)
+    expect(await env.DB.prepare('SELECT resolved_by, resolved_at FROM duplicate_candidates WHERE id = ?').bind(row!.id).first()).toMatchObject({ resolved_by: 'admin-7' })
   })
 })

@@ -171,6 +171,14 @@ export async function masjidDeleteSpecs(ctx: WriteCtx, before: MasjidEntity, now
     }],
     onPreconditionLost: async () => versionConflict(await loadMasjid(ctx.db, id)),
     loadCurrent: () => loadMasjid(ctx.db, id),
+    // A deleted masjid leaves the duplicate queue: its pending pairs are closed in the same batch.
+    children: (b) => [
+      b.stmt(
+        `UPDATE duplicate_candidates SET status = 'dismissed', resolved_at = ?, resolved_by = ?
+         WHERE status = 'pending' AND (masjid_a = {{ID}} OR masjid_b = {{ID}})`,
+        [now, ctx.actor],
+      ),
+    ],
     status: 200,
   }
   return [masjidSpec, ...events.map(e => eventDeleteSpec(ctx, e, now))]

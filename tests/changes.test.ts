@@ -82,7 +82,7 @@ describe('GET /changes', () => {
     const m = await createMasjid()
     const row = await env.DB.prepare('SELECT * FROM changes WHERE entity_id = ? AND entity = ?').bind(m.id, 'masjid').first<Record<string, unknown>>()
     expect(Object.keys(row!).sort()).toEqual([
-      'actor', 'after_json', 'before_json', 'changed_fields', 'entity', 'entity_id', 'masjid_id', 'occurred_at', 'op', 'origin_app', 'seq', 'version',
+      'actor', 'admin_note', 'after_json', 'before_json', 'changed_fields', 'entity', 'entity_id', 'masjid_id', 'occurred_at', 'op', 'origin_app', 'seq', 'version',
     ])
     expect(row!.actor).toBe('user-1')
   })
