@@ -6,7 +6,7 @@ import { ApiError } from '../lib/errors'
 import { newSecret } from '../lib/webhooks'
 import { getActor, type AppEnv } from '../middleware/auth'
 import { loadMasjidsByIds } from '../lib/entities'
-import { buildMergeSpecs, buildRevertSpecs } from '../lib/admin'
+import { adminCtx, buildMergeSpecs, buildRevertSpecs } from '../lib/admin'
 import { decodeCursor, encodeCursor, intParam } from '../lib/page'
 import { isoNow } from '../lib/time'
 import { beginWrite, commitWrite, parseJsonObject, replayOnConflict, type WriteCtx } from '../lib/write'
@@ -120,7 +120,7 @@ adminRouter.post('/masjids/:id/merge', async (c) => {
     const body = parseJsonObject(ctx)
     const into = parseInto(body)
     const reason = parseReason(body)
-    return commitWrite(c, ctx, await buildMergeSpecs(ctx, loserId, into, reason, isoNow()))
+    return commitWrite(c, adminCtx(ctx), await buildMergeSpecs(ctx, loserId, into, reason, isoNow()))
   })
 })
 
@@ -132,7 +132,7 @@ adminRouter.post('/changes/:seq/revert', async (c) => {
   const ctx: WriteCtx = begin.ctx
   return replayOnConflict(ctx, async () => {
     try {
-      return await commitWrite(c, ctx, await buildRevertSpecs(ctx, seq, isoNow()))
+      return await commitWrite(c, adminCtx(ctx, `revert:${seq}`), await buildRevertSpecs(ctx, seq, isoNow()))
     } catch (err) {
       if (!(err instanceof ApiError) && String(err instanceof Error ? err.message : err).includes('UNIQUE')) {
         throw new ApiError(409, 'already_linked', 'An external id from the logged state now belongs to another entity')
@@ -239,6 +239,6 @@ adminRouter.post('/duplicates/:id/merge', async (c) => {
       })
     }
     const loser = into === row.masjid_a ? row.masjid_b : row.masjid_a
-    return commitWrite(c, ctx, await buildMergeSpecs(ctx, loser, into, parseReason(body), isoNow()))
+    return commitWrite(c, adminCtx(ctx), await buildMergeSpecs(ctx, loser, into, parseReason(body), isoNow()))
   })
 })
