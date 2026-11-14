@@ -2,676 +2,58 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Masjid Sentral API",
-    "version": "1.0.0",
-    "description": "Open database of every masjid, surau, and musolla in Malaysia"
+    "version": "1.1.0",
+    "description": "Master copy of masjids and their programmes for Jejak Masjid, Qiyam and other apps. Every request except `GET /` and `GET /openapi.json` needs `Authorization: Bearer <key>` (keys are server-side secrets; there is no CORS). Writes need the `write` scope, an `X-Sentral-Actor` header and, on POST/PATCH/DELETE, an `Idempotency-Key`; PATCH and DELETE also need `If-Match`. Routes under /admin need the `admin` scope. The integration contract (docs/INTEGRATION_CONTRACT.md) is the source of truth for client-visible behaviour."
   },
   "servers": [
-    { "url": "https://api.masjidsentral.workers.dev", "description": "Production" }
-  ],
-  "components": {
-    "securitySchemes": {
-      "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer"
-      }
-    },
-    "schemas": {
-      "StateRow": {
-        "type": "object",
-        "properties": {
-          "id":         { "type": "string", "example": "my-sgr" },
-          "name":       { "type": "string", "example": "Selangor" },
-          "country_id": { "type": "string", "example": "my" }
-        },
-        "required": ["id", "name", "country_id"]
-      },
-      "CityRow": {
-        "type": "object",
-        "properties": {
-          "id":       { "type": "string", "example": "my-sgr-sha" },
-          "name":     { "type": "string", "example": "Shah Alam" },
-          "state_id": { "type": "string", "example": "my-sgr" }
-        },
-        "required": ["id", "name", "state_id"]
-      },
-      "MasjidRow": {
-        "type": "object",
-        "description": "Full masjid record — public fields only (internal soft-delete column excluded)",
-        "properties": {
-          "id":               { "type": "integer", "example": 1 },
-          "name":             { "type": "string",  "example": "Masjid Sultan Salahuddin Abdul Aziz Shah" },
-          "type_id":          { "type": "string",  "example": "masjid" },
-          "lat":              { "type": "number",  "format": "double", "example": 3.0697 },
-          "lng":              { "type": "number",  "format": "double", "example": 101.5186 },
-          "geohash":          { "type": "string",  "example": "w21zd5x" },
-          "city_id":          { "type": ["string", "null"], "example": "my-sgr-sha" },
-          "state_id":         { "type": "string",  "example": "my-sgr" },
-          "country_id":       { "type": "string",  "example": "my" },
-          "address":          { "type": ["string", "null"], "example": "Persiaran Masjid, Shah Alam, Selangor" },
-          "description":      { "type": ["string", "null"], "example": "State mosque of Selangor" },
-          "status":           { "type": "string",  "enum": ["active", "deleted"], "example": "active" },
-          "jumaat_available": { "type": "integer", "enum": [0, 1], "example": 1 },
-          "telephone":        { "type": ["string", "null"], "example": "+60355191133" },
-          "email":            { "type": ["string", "null"], "example": null },
-          "google_url":       { "type": ["string", "null"], "example": "https://maps.google.com/?cid=12345" },
-          "source":           { "type": "string",  "example": "jejak_masjid" },
-          "created_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
-          "updated_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" }
-        },
-        "required": [
-          "id", "name", "type_id", "lat", "lng", "geohash",
-          "city_id", "state_id", "country_id", "address", "description",
-          "status", "jumaat_available", "telephone", "email", "google_url",
-          "source", "created_at", "updated_at"
-        ]
-      },
-      "MasjidListItem": {
-        "type": "object",
-        "description": "Masjid record as returned in list responses — excludes description, geohash, telephone, email, google_url; adds thumbnail_url",
-        "properties": {
-          "id":               { "type": "integer", "example": 1 },
-          "name":             { "type": "string",  "example": "Masjid Sultan Salahuddin Abdul Aziz Shah" },
-          "type_id":          { "type": "string",  "example": "masjid" },
-          "lat":              { "type": "number",  "format": "double", "example": 3.0697 },
-          "lng":              { "type": "number",  "format": "double", "example": 101.5186 },
-          "city_id":          { "type": ["string", "null"], "example": "my-sgr-sha" },
-          "state_id":         { "type": "string",  "example": "my-sgr" },
-          "country_id":       { "type": "string",  "example": "my" },
-          "address":          { "type": ["string", "null"], "example": "Persiaran Masjid, Shah Alam, Selangor" },
-          "status":           { "type": "string",  "enum": ["active", "deleted"], "example": "active" },
-          "jumaat_available": { "type": "integer", "enum": [0, 1], "example": 1 },
-          "source":           { "type": "string",  "example": "jejak_masjid" },
-          "created_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
-          "updated_at":       { "type": "string",  "format": "date-time", "example": "2024-01-01T00:00:00.000Z" },
-          "thumbnail_url":    { "type": ["string", "null"], "example": "https://imagedelivery.net/abc123/thumb/thumbnail" }
-        },
-        "required": [
-          "id", "name", "type_id", "lat", "lng",
-          "city_id", "state_id", "country_id", "address",
-          "status", "jumaat_available", "source", "created_at", "updated_at",
-          "thumbnail_url"
-        ]
-      },
-      "MasjidImageDetail": {
-        "type": "object",
-        "properties": {
-          "id":            { "type": "integer", "example": 1 },
-          "masjid_id":     { "type": "integer", "example": 1 },
-          "path":          { "type": "string",  "example": "abc123defg456" },
-          "is_thumbnail":  { "type": "integer", "enum": [0, 1], "example": 1 },
-          "sort_order":    { "type": "integer", "example": 0 },
-          "created_at":    { "type": "string",  "format": "date-time" },
-          "thumbnail_url": { "type": "string",  "example": "https://imagedelivery.net/abc123/abc123defg456/thumbnail" },
-          "full_url":      { "type": "string",  "example": "https://imagedelivery.net/abc123/abc123defg456/public" }
-        },
-        "required": ["id", "masjid_id", "path", "is_thumbnail", "sort_order", "created_at", "thumbnail_url", "full_url"]
-      },
-      "MasjidFacility": {
-        "type": "object",
-        "properties": {
-          "id":        { "type": "integer", "example": 1 },
-          "masjid_id": { "type": "integer", "example": 1 },
-          "facility":  { "type": "string",  "example": "wudu" }
-        },
-        "required": ["id", "masjid_id", "facility"]
-      },
-      "MasjidContact": {
-        "type": "object",
-        "properties": {
-          "masjid_id": { "type": "integer", "example": 1 },
-          "type":      { "type": "string", "enum": ["facebook", "instagram", "twitter", "youtube", "whatsapp"], "example": "facebook" },
-          "value":     { "type": "string", "example": "https://facebook.com/masjidshahalam" }
-        },
-        "required": ["masjid_id", "type", "value"]
-      },
-      "MasjidReview": {
-        "type": "object",
-        "properties": {
-          "id":         { "type": "integer", "example": 1 },
-          "masjid_id":  { "type": "integer", "example": 1 },
-          "rating":     { "type": "number",  "minimum": 1, "maximum": 5, "example": 4.5 },
-          "message":    { "type": ["string", "null"], "example": "Clean and spacious" },
-          "source_app": { "type": "string",  "example": "jejak_masjid" },
-          "created_at": { "type": "string",  "format": "date-time" }
-        },
-        "required": ["id", "masjid_id", "rating", "message", "source_app", "created_at"]
-      },
-      "MasjidEvent": {
-        "type": "object",
-        "properties": {
-          "id":          { "type": "integer", "example": 1 },
-          "masjid_id":   { "type": "integer", "example": 1 },
-          "title":       { "type": "string",  "example": "Kuliah Subuh" },
-          "description": { "type": ["string", "null"], "example": "Weekly Subuh lecture" },
-          "start_at":    { "type": "string",  "format": "date-time", "example": "2026-06-15T05:30:00.000Z" },
-          "end_at":      { "type": ["string", "null"], "format": "date-time" },
-          "status":      { "type": "string",  "enum": ["active", "cancelled", "completed"], "example": "active" },
-          "rrule":       { "type": ["string", "null"], "example": "FREQ=WEEKLY;BYDAY=SU" },
-          "source_app":  { "type": "string",  "example": "jejak_masjid" },
-          "created_at":  { "type": "string",  "format": "date-time" },
-          "updated_at":  { "type": "string",  "format": "date-time" }
-        },
-        "required": ["id", "masjid_id", "title", "description", "start_at", "end_at", "status", "rrule", "source_app", "created_at", "updated_at"]
-      },
-      "MasjidDetail": {
-        "allOf": [
-          { "$ref": "#/components/schemas/MasjidRow" },
-          {
-            "type": "object",
-            "properties": {
-              "images":       { "type": "array", "items": { "$ref": "#/components/schemas/MasjidImageDetail" } },
-              "facilities":   { "type": "array", "items": { "$ref": "#/components/schemas/MasjidFacility" } },
-              "contacts":     { "type": "array", "items": { "$ref": "#/components/schemas/MasjidContact" } },
-              "reviews":      { "type": "array", "items": { "$ref": "#/components/schemas/MasjidReview" } },
-              "events":       { "type": "array", "items": { "$ref": "#/components/schemas/MasjidEvent" } },
-              "avg_rating":   { "type": ["number", "null"], "example": 4.5 },
-              "review_count": { "type": "integer", "example": 12 }
-            },
-            "required": ["images", "facilities", "contacts", "reviews", "events", "avg_rating", "review_count"]
-          }
-        ]
-      },
-      "MasjidListResponse": {
-        "type": "object",
-        "properties": {
-          "data": {
-            "type": "array",
-            "items": { "$ref": "#/components/schemas/MasjidListItem" }
-          },
-          "meta": {
-            "type": "object",
-            "properties": {
-              "total":    { "type": "integer", "example": 11429 },
-              "page":     { "type": "integer", "example": 1 },
-              "per_page": { "type": "integer", "example": 20 }
-            },
-            "required": ["total", "page", "per_page"]
-          }
-        },
-        "required": ["data", "meta"]
-      },
-      "ErrorResponse": {
-        "type": "object",
-        "properties": {
-          "error": { "type": "string", "example": "Missing required param: state" }
-        },
-        "required": ["error"]
-      }
+    {
+      "url": "https://api.masjidsentral.workers.dev",
+      "description": "Production"
     }
-  },
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Meta"
+    },
+    {
+      "name": "Reference"
+    },
+    {
+      "name": "Masjids"
+    },
+    {
+      "name": "Programmes"
+    },
+    {
+      "name": "Change feed"
+    },
+    {
+      "name": "Admin"
+    }
+  ],
   "paths": {
-    "/states": {
+    "/": {
       "get": {
-        "summary": "List states",
-        "description": "Returns all states. Optionally filter by country.",
-        "operationId": "listStates",
-        "tags": ["Reference"],
-        "parameters": [
-          {
-            "name": "country",
-            "in": "query",
-            "required": false,
-            "description": "Filter by country ID (e.g. `my`, `sg`, `bn`, `id`)",
-            "schema": { "type": "string", "example": "my" }
-          }
+        "operationId": "root",
+        "tags": [
+          "Meta"
         ],
+        "summary": "Health check",
+        "description": "Public: no key needed.",
+        "security": [],
         "responses": {
           "200": {
-            "description": "List of states",
+            "description": "OK",
             "content": {
-              "application/json": {
+              "text/plain": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": { "$ref": "#/components/schemas/StateRow" }
-                    }
-                  },
-                  "required": ["data"]
-                },
-                "example": {
-                  "data": [
-                    { "id": "my-sgr", "name": "Selangor", "country_id": "my" },
-                    { "id": "my-kul", "name": "Kuala Lumpur", "country_id": "my" }
-                  ]
+                  "type": "string"
                 }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/cities": {
-      "get": {
-        "summary": "List cities in a state",
-        "description": "Returns all cities within a given state. The `state` query parameter is required.",
-        "operationId": "listCities",
-        "tags": ["Reference"],
-        "parameters": [
-          {
-            "name": "state",
-            "in": "query",
-            "required": true,
-            "description": "State ID (e.g. `my-sgr`)",
-            "schema": { "type": "string", "example": "my-sgr" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of cities",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": { "$ref": "#/components/schemas/CityRow" }
-                    }
-                  },
-                  "required": ["data"]
-                },
-                "example": {
-                  "data": [
-                    { "id": "my-sgr-sha", "name": "Shah Alam", "state_id": "my-sgr" },
-                    { "id": "my-sgr-kls", "name": "Klang", "state_id": "my-sgr" }
-                  ]
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Missing required param: state",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Missing required param: state" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/masjids": {
-      "get": {
-        "summary": "List masjids",
-        "description": "Returns a paginated list of masjids. Supports filtering by state, city, type, name search, and Jumaat availability. D-05: Selangor example — `state=my-sgr`.",
-        "operationId": "listMasjids",
-        "tags": ["Masjids"],
-        "parameters": [
-          {
-            "name": "state",
-            "in": "query",
-            "required": false,
-            "description": "Filter by state ID (e.g. `my-sgr`)",
-            "schema": { "type": "string", "example": "my-sgr" }
-          },
-          {
-            "name": "city",
-            "in": "query",
-            "required": false,
-            "description": "Filter by city ID (e.g. `my-sgr-sha`)",
-            "schema": { "type": "string" }
-          },
-          {
-            "name": "type",
-            "in": "query",
-            "required": false,
-            "description": "Filter by masjid type",
-            "schema": { "type": "string", "enum": ["masjid", "surau", "mini-surau"] }
-          },
-          {
-            "name": "jumaat",
-            "in": "query",
-            "required": false,
-            "description": "Filter to only masjids that hold Friday prayers (`1` = yes)",
-            "schema": { "type": "string", "enum": ["1"] }
-          },
-          {
-            "name": "q",
-            "in": "query",
-            "required": false,
-            "description": "Name search (case-insensitive LIKE; max 48 characters)",
-            "schema": { "type": "string", "maxLength": 48 }
-          },
-          {
-            "name": "page",
-            "in": "query",
-            "required": false,
-            "description": "Page number (default 1; always 20 results per page)",
-            "schema": { "type": "integer", "minimum": 1, "default": 1 }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Paginated list of masjids",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/MasjidListResponse" },
-                "example": {
-                  "data": [
-                    {
-                      "id": 1,
-                      "name": "Masjid Sultan Salahuddin Abdul Aziz Shah",
-                      "type_id": "masjid",
-                      "lat": 3.0697,
-                      "lng": 101.5186,
-                      "city_id": "my-sgr-sha",
-                      "state_id": "my-sgr",
-                      "country_id": "my",
-                      "address": "Persiaran Masjid, Shah Alam, Selangor",
-                      "status": "active",
-                      "jumaat_available": 1,
-                      "source": "jejak_masjid",
-                      "created_at": "2024-01-01T00:00:00.000Z",
-                      "updated_at": "2024-01-01T00:00:00.000Z",
-                      "thumbnail_url": null
-                    }
-                  ],
-                  "meta": { "total": 3500, "page": 1, "per_page": 20 }
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "summary": "Create a new masjid",
-        "description": "Creates a new masjid record. Requires a valid API key (Bearer token).",
-        "operationId": "createMasjid",
-        "tags": ["Masjids"],
-        "security": [{ "bearerAuth": [] }],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name":              { "type": "string",  "description": "Full name of the masjid" },
-                  "type_id":           { "type": "string",  "enum": ["masjid", "surau", "mini-surau"] },
-                  "state_id":          { "type": "string",  "description": "State ID (e.g. `my-sgr`)" },
-                  "country_id":        { "type": "string",  "description": "Country ID (e.g. `my`)" },
-                  "lat":               { "type": "number",  "format": "double", "description": "Latitude" },
-                  "lng":               { "type": "number",  "format": "double", "description": "Longitude" },
-                  "address":           { "type": "string",  "description": "Street address" },
-                  "source":            { "type": "string",  "description": "Data source identifier", "enum": ["jejak_masjid", "qiyam", "osm", "manual"] },
-                  "city_id":           { "type": "string",  "description": "City ID (optional)" },
-                  "description":       { "type": "string",  "description": "Description of the masjid" },
-                  "telephone":         { "type": "string" },
-                  "email":             { "type": "string",  "format": "email" },
-                  "google_url":        { "type": "string",  "format": "uri" },
-                  "jumaat_available":  { "type": ["integer", "boolean"], "description": "1/true if Friday prayers held" }
-                },
-                "required": ["name", "type_id", "state_id", "country_id", "lat", "lng", "address", "source"]
-              },
-              "example": {
-                "name": "Masjid Al-Falah",
-                "type_id": "masjid",
-                "state_id": "my-sgr",
-                "country_id": "my",
-                "lat": 3.1,
-                "lng": 101.6,
-                "address": "Jalan Masjid, Shah Alam, Selangor",
-                "source": "manual",
-                "jumaat_available": 1
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Masjid created",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/MasjidRow" }
-              }
-            }
-          },
-          "400": {
-            "description": "Missing or invalid field",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Missing required field: name" }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — invalid or missing API key",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Unauthorized" }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/masjids/nearby": {
-      "get": {
-        "summary": "Nearby masjid search",
-        "description": "Returns masjids within a given radius of the provided coordinates. Uses geohash prefix matching + Haversine distance filter.",
-        "operationId": "nearbyMasjids",
-        "tags": ["Masjids"],
-        "parameters": [
-          {
-            "name": "lat",
-            "in": "query",
-            "required": true,
-            "description": "Latitude (-90 to 90)",
-            "schema": { "type": "number", "format": "double", "minimum": -90, "maximum": 90 }
-          },
-          {
-            "name": "lng",
-            "in": "query",
-            "required": true,
-            "description": "Longitude (-180 to 180)",
-            "schema": { "type": "number", "format": "double", "minimum": -180, "maximum": 180 }
-          },
-          {
-            "name": "radius",
-            "in": "query",
-            "required": false,
-            "description": "Search radius in kilometres (default 5, max 20)",
-            "schema": { "type": "number", "format": "double", "minimum": 0.001, "maximum": 20, "default": 5 }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Masjids within the requested radius",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "data": {
-                      "type": "array",
-                      "items": { "$ref": "#/components/schemas/MasjidListItem" }
-                    },
-                    "meta": {
-                      "type": "object",
-                      "properties": {
-                        "total":    { "type": "integer" },
-                        "page":     { "type": "integer" },
-                        "per_page": { "type": "integer" }
-                      },
-                      "required": ["total", "page", "per_page"]
-                    }
-                  },
-                  "required": ["data", "meta"]
-                },
-                "example": {
-                  "data": [],
-                  "meta": { "total": 0, "page": 1, "per_page": 20 }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid or missing parameters",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "examples": {
-                  "missing_lat_lng": {
-                    "summary": "Missing lat/lng",
-                    "value": { "error": "Missing required param: lat, lng" }
-                  },
-                  "invalid_range": {
-                    "summary": "Out-of-range coordinates",
-                    "value": { "error": "Invalid lat/lng range" }
-                  },
-                  "radius_too_large": {
-                    "summary": "Radius exceeds maximum",
-                    "value": { "error": "Radius exceeds maximum of 20km" }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/masjids/{id}": {
-      "get": {
-        "summary": "Get masjid detail",
-        "description": "Returns the full detail record for a single masjid including images, facilities, contacts, reviews, and upcoming events.",
-        "operationId": "getMasjid",
-        "tags": ["Masjids"],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "description": "Masjid integer ID",
-            "schema": { "type": "integer", "example": 1 }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Full masjid detail",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/MasjidDetail" }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid ID format",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Invalid id" }
-              }
-            }
-          },
-          "404": {
-            "description": "Masjid not found or deleted",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Masjid not found" }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "summary": "Update a masjid",
-        "description": "Partially updates an existing masjid. Requires a valid API key. `lat` and `lng` must both be provided together when updating coordinates — the geohash is recomputed server-side.",
-        "operationId": "updateMasjid",
-        "tags": ["Masjids"],
-        "security": [{ "bearerAuth": [] }],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "description": "Masjid integer ID",
-            "schema": { "type": "integer", "example": 1 }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "description": "Any subset of patchable fields. `lat` and `lng` must both be present or both absent.",
-                "properties": {
-                  "name":             { "type": "string" },
-                  "type_id":          { "type": "string", "enum": ["masjid", "surau", "mini-surau"] },
-                  "state_id":         { "type": "string" },
-                  "country_id":       { "type": "string" },
-                  "city_id":          { "type": "string" },
-                  "lat":              { "type": "number", "format": "double" },
-                  "lng":              { "type": "number", "format": "double" },
-                  "address":          { "type": "string" },
-                  "description":      { "type": "string" },
-                  "telephone":        { "type": "string" },
-                  "email":            { "type": "string", "format": "email" },
-                  "google_url":       { "type": "string", "format": "uri" },
-                  "jumaat_available": { "type": ["integer", "boolean"] },
-                  "source":           { "type": "string" }
-                },
-                "minProperties": 1
-              },
-              "example": {
-                "name": "Masjid Sultan Salahuddin Abdul Aziz Shah (Biru)",
-                "jumaat_available": 1
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Updated masjid record",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/MasjidRow" }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "examples": {
-                  "invalid_id": {
-                    "summary": "Non-numeric ID",
-                    "value": { "error": "Invalid id" }
-                  },
-                  "lat_lng_paired": {
-                    "summary": "lat without lng (or vice versa)",
-                    "value": { "error": "lat and lng must both be provided together" }
-                  },
-                  "no_fields": {
-                    "summary": "Empty body",
-                    "value": { "error": "No patchable fields provided" }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — invalid or missing API key",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Unauthorized" }
-              }
-            }
-          },
-          "404": {
-            "description": "Masjid not found or deleted",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "example": { "error": "Masjid not found" }
               }
             }
           }
@@ -680,25 +62,5041 @@
     },
     "/openapi.json": {
       "get": {
-        "summary": "OpenAPI specification",
-        "description": "Returns this OpenAPI 3.1.0 specification as JSON. Used by Scalar and other tooling to render the API reference.",
-        "operationId": "getOpenApiSpec",
-        "tags": ["Meta"],
+        "operationId": "openapi",
+        "tags": [
+          "Meta"
+        ],
+        "summary": "This document",
+        "description": "Public: no key needed.",
+        "security": [],
         "responses": {
           "200": {
-            "description": "OpenAPI 3.1.0 specification",
+            "description": "OpenAPI 3.1 document",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "openapi": { "type": "string", "example": "3.1.0" }
-                  }
+                  "type": "object"
                 }
               }
             }
           }
         }
+      }
+    },
+    "/states": {
+      "get": {
+        "operationId": "listStates",
+        "tags": [
+          "Reference"
+        ],
+        "summary": "List states",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "description": "Country id (`my`, `sg`, `bn`, `id`)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "States",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/State"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/cities": {
+      "get": {
+        "operationId": "listCities",
+        "tags": [
+          "Reference"
+        ],
+        "summary": "List cities of a state",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "description": "State id, e.g. `my-sgr`",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Cities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/City"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/facilities": {
+      "get": {
+        "operationId": "listFacilities",
+        "tags": [
+          "Reference"
+        ],
+        "summary": "Facility code catalogue",
+        "description": "Active codes only. Catalogue is provisional pending the JM x Qiyam agreement.",
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Catalogue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/FacilityCatalogueItem"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/masjids": {
+      "get": {
+        "operationId": "listMasjids",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "List and filter masjids",
+        "description": "Active masjids only.",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "description": "State id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "city",
+            "in": "query",
+            "required": false,
+            "description": "City id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Type id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Substring of the name (alias `q`)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "jumaat",
+            "in": "query",
+            "required": false,
+            "description": "Friday prayer available",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false",
+                "1",
+                "0"
+              ]
+            }
+          },
+          {
+            "name": "updated_since",
+            "in": "query",
+            "required": false,
+            "description": "RFC 3339 instant (URL-encode `+` as %2B)",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size (max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Page of masjids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Masjid"
+                      }
+                    },
+                    "next_cursor": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      },
+      "post": {
+        "operationId": "createMasjid",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Create a masjid",
+        "description": "Needs `write`, an app_id on the key, `Idempotency-Key`, `X-Sentral-Actor`. A same-type candidate with score >= 0.9 within 50 m gives 409 possible_duplicate unless `?force=true` (recorded as `forced` in the change).",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "description": "Skip the duplicate gate after a person confirmed it is a different place",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasjidCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "possible_duplicate (`details.candidates`), already_linked (`details.masjid_id`) or idempotency_mismatch (`possible_duplicate`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/masjids/nearby": {
+      "get": {
+        "operationId": "nearbyMasjids",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Masjids near a point",
+        "description": "Active only, nearest first; rows add `distance_m`.",
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "description": "Latitude",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "lng",
+            "in": "query",
+            "required": true,
+            "description": "Longitude",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "radius",
+            "in": "query",
+            "required": false,
+            "description": "Metres",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20000,
+              "default": 5000
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size (max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Page of masjids with distance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MasjidWithDistance"
+                      }
+                    },
+                    "next_cursor": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/masjids/match": {
+      "get": {
+        "operationId": "matchMasjids",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Duplicate / link candidates",
+        "description": "Top 5 active masjids within 1 km by score 0-1.",
+        "parameters": [
+          {
+            "name": "lat",
+            "in": "query",
+            "required": true,
+            "description": "Latitude",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "lng",
+            "in": "query",
+            "required": true,
+            "description": "Longitude",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Name to compare",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type_id",
+            "in": "query",
+            "required": false,
+            "description": "Your type id; fills `same_type`",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "candidates": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MatchCandidate"
+                      }
+                    }
+                  },
+                  "required": [
+                    "candidates"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/masjids/by-external/{app_id}/{external_id}": {
+      "get": {
+        "operationId": "masjidByExternal",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Find a masjid by your own id",
+        "description": "Whatever its status.",
+        "parameters": [
+          {
+            "name": "app_id",
+            "in": "path",
+            "required": true,
+            "description": "Your own app_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "external_id",
+            "in": "path",
+            "required": true,
+            "description": "Your id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The masjid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/masjids/{id}": {
+      "get": {
+        "operationId": "getMasjid",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Get a masjid",
+        "description": "A merged id returns 301 with `Location` set to the survivor; a deleted id returns the tombstone (`status: deleted`).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The masjid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "Merged: `Location: /masjids/<merged_into>`",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      },
+      "patch": {
+        "operationId": "patchMasjid",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Update a masjid",
+        "description": "Send only changed fields. A PATCH that changes nothing still bumps the version. PATCH on a merged masjid is 404 with `details.merged_into`.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The entity `version` the edit is based on.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasjidPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      },
+      "delete": {
+        "operationId": "deleteMasjid",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Soft-delete a masjid",
+        "description": "Its programmes are deleted in the same write. More than 200 live programmes: 422 `details.reason: too_many_events`. A programme added while the delete runs: 409 version_conflict, retry.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The entity `version` the edit is based on.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The tombstone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/masjids/{id}/external-ids/{app_id}": {
+      "put": {
+        "operationId": "linkMasjid",
+        "tags": [
+          "Masjids"
+        ],
+        "summary": "Link your id to a masjid",
+        "description": "Own app_id only. Same id again is a 200 no-op; a different id from your app, or an id held by another active masjid, is 409 already_linked. `Idempotency-Key` optional, no `If-Match`.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "app_id",
+            "in": "path",
+            "required": true,
+            "description": "Your own app_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Optional here.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The masjid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_linked (`already_linked`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/masjids/{id}/events": {
+      "get": {
+        "operationId": "listMasjidEvents",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Programmes of a masjid",
+        "description": "`active` and `cancelled`, whose first occurrence starts before `to` and that repeat or have not ended before `from`. Ordered by start_at, id. Repeating programmes are returned once.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Default now",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "Default now + 90 days",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size (max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Page of programmes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Programme"
+                      }
+                    },
+                    "next_cursor": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ]
+                }
+              }
+            }
+          },
+          "301": {
+            "description": "Merged masjid: Location points at the survivor's events",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      },
+      "post": {
+        "operationId": "createProgramme",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Create a programme",
+        "description": "The masjid must be active (deleted: 404; merged: 404 with `details.merged_into`).",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProgrammeCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_linked or idempotency_mismatch (`already_linked`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "listEvents",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Programmes of several masjids",
+        "description": "Up to 100 masjid ids per call; non-active masjids' programmes are hidden.",
+        "parameters": [
+          {
+            "name": "masjid_ids",
+            "in": "query",
+            "required": true,
+            "description": "e.g. `1,2,3`",
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated ids"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Default now",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "Default now + 90 days",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size (max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Page of programmes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Programme"
+                      }
+                    },
+                    "next_cursor": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/events/by-external/{app_id}/{external_id}": {
+      "get": {
+        "operationId": "eventByExternal",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Find a programme by your own id",
+        "description": "Whatever its status.",
+        "parameters": [
+          {
+            "name": "app_id",
+            "in": "path",
+            "required": true,
+            "description": "Your own app_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "external_id",
+            "in": "path",
+            "required": true,
+            "description": "Your id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The programme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/events/{id}": {
+      "get": {
+        "operationId": "getEvent",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Get a programme",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The programme (a deleted one is the tombstone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      },
+      "patch": {
+        "operationId": "patchEvent",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Update a programme",
+        "description": "PATCH of a programme whose masjid is not active is 404 (`details.merged_into` when merged).",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The entity `version` the edit is based on.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProgrammePatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      },
+      "delete": {
+        "operationId": "deleteEvent",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Delete a programme",
+        "description": "Sets `status: deleted`.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The entity `version` the edit is based on.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The tombstone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/events/{id}/external-ids/{app_id}": {
+      "put": {
+        "operationId": "linkEvent",
+        "tags": [
+          "Programmes"
+        ],
+        "summary": "Link your id to a programme",
+        "description": "Same rules as the masjid link.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "app_id",
+            "in": "path",
+            "required": true,
+            "description": "Your own app_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Optional here.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The programme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Programme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_linked (`details.event_id`) (`already_linked`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "write"
+      }
+    },
+    "/changes": {
+      "get": {
+        "operationId": "listChanges",
+        "tags": [
+          "Change feed"
+        ],
+        "summary": "Pull changes",
+        "description": "Source of truth for inbound sync. Webhooks are only a ping.",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Last `seq` you have applied",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 200
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Changes in seq order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangesPage"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/changes/latest": {
+      "get": {
+        "operationId": "latestChange",
+        "tags": [
+          "Change feed"
+        ],
+        "summary": "Latest seq",
+        "description": "Use it to start the cursor after your first full sync.",
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Latest seq",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "latest_seq": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "latest_seq"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "read"
+      }
+    },
+    "/admin/webhooks": {
+      "get": {
+        "operationId": "adminListWebhooks",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List webhook subscriptions",
+        "description": "Never shows secrets.",
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Subscriptions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "webhooks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Webhook"
+                      }
+                    }
+                  },
+                  "required": [
+                    "webhooks"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      },
+      "post": {
+        "operationId": "adminCreateWebhook",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Register a webhook",
+        "description": "The target key needs an app_id and the `webhook` scope. The secret is shown once.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookRegistration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookCreated"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already_exists (this key already has a webhook for the URL) (`already_exists`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/webhooks/{id}": {
+      "delete": {
+        "operationId": "adminDeleteWebhook",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Delete a webhook",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/masjids/{id}/merge": {
+      "post": {
+        "operationId": "adminMergeMasjid",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Merge a duplicate into a survivor",
+        "description": "The masjid in the path is removed; `into` survives. One atomic write, changes in this order: the loser gets a `merge` change (`merged_into`, `moved_external_ids`), then each live programme an `event` `update` with the new masjid_id (`via_merge`), then the survivor an `update` (external_ids, `via_merge`). The response is the merged loser. A survivor may end up holding two ids from one app. Pending queue rows are resolved: the pair becomes `merged`, the loser's other pending pairs are re-pointed to the survivor. Masjids already merged into the loser now point at the survivor (one 301 hop). The optional `reason` is kept in the admin log only, never in `/changes`. More than 200 live programmes on the loser: 422 `details.reason: too_many_events`. `Idempotency-Key` required.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Masjid to remove",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The removed masjid (`status: merged`, `merged_into` set, `external_ids` empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/changes/{seq}/revert": {
+      "post": {
+        "operationId": "adminRevertChange",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Revert a change",
+        "description": "Field-level revert. For an `update`, only the fields listed in the change's `changed_fields` are restored, from its `before_json`, as a new write (actor `revert:<seq>:<admin actor>`, origin `sentral_admin`, current version). External ids: only the ids that change added or removed are undone, never the whole set. Contacts, facilities and images are restored only when listed. If a later change to the same entity touched any of those fields: 422 `stale_revert` with `details.later_seqs`, unless `?force=true` (the new change then has `forced: true` in `data`). Create revert = soft delete (cascades to programmes); delete revert = restore as active. 422 `validation_failed` for merges and the changes a merge made (`merge_not_revertable`), merged entities (`entity_merged`), an already-deleted/not-deleted entity, a programme whose masjid is not active, or a change with nothing to restore (`nothing_to_revert`). A concurrent write is 409; retry. `Idempotency-Key` required.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "seq",
+            "in": "path",
+            "required": true,
+            "description": "Change seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "description": "`true` to revert despite later changes to the same fields (default `false`).",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (`validation_failed`), or `stale_revert` (`details.later_seqs`, `details.fields`) when later changes touched the same fields",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The entity after the revert",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Masjid"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Programme"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/duplicates": {
+      "get": {
+        "operationId": "adminListDuplicates",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Duplicate review queue",
+        "description": "Produced by the hourly scan (score >= 0.8, within 150 m).",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "merged",
+                "dismissed",
+                "all"
+              ],
+              "default": "pending"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size (max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (invalid query parameter or cursor) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Page of pairs (ascending id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Duplicate"
+                      }
+                    },
+                    "next_cursor": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/duplicates/{id}/dismiss": {
+      "post": {
+        "operationId": "adminDismissDuplicate",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Dismiss a pair",
+        "description": "'These are different places'. Dismissing twice is a no-op; a merged pair is 422 `not_pending`. A dismissed pair is never re-queued. The admin actor and time are recorded on the row (not returned). `Idempotency-Key` required.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Required here (422 `validation_failed` when missing). Same key and same request within 24 h returns the original response.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The pair",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Duplicate"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/duplicates/{id}/merge": {
+      "post": {
+        "operationId": "adminMergeDuplicate",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Merge a queued pair",
+        "description": "`into` must be `masjid_a` or `masjid_b`; the other is merged into it (same write as the masjid merge). The row becomes `merged`; the removed masjid's other pending pairs are re-pointed to the survivor. `Idempotency-Key` required.",
+        "parameters": [
+          {
+            "name": "X-Sentral-Actor",
+            "in": "header",
+            "required": true,
+            "description": "Opaque app-local user id, or `system`. Never personal data.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Id",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Unique per logical write. Same key and same request within 24 h returns the original response; same key with a different request is 409 idempotency_mismatch. Required here (422 `validation_failed` when missing), so a double-sent request cannot apply twice.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateMergeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed (missing/invalid header or body) (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The removed masjid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Masjid"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`details.merged_into` when the masjid was merged) (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: `details.current` holds the latest entity; idempotency_mismatch: same key, different request (`version_conflict`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    },
+    "/admin/scan": {
+      "get": {
+        "operationId": "adminScanStatus",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Duplicate scan status",
+        "description": "The scan runs hourly (25 masjids per search batch, 150 per run) and continues from its cursor. Use this to see progress, the last run, the last error, and whether a run is stalled (killed before finishing). After 3 unfinished runs on one cursor the next run goes one masjid at a time and skips (and lists in `skipped_ids`) any masjid that still fails.",
+        "responses": {
+          "200": {
+            "description": "Scan state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid key (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the required scope (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded (600/min per key); honour Retry-After (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-required-scope": "admin"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API key (`ms_live_...`). Scopes: read, write, webhook, admin."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable message"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "unauthorized",
+              "forbidden",
+              "not_found",
+              "version_conflict",
+              "idempotency_mismatch",
+              "validation_failed",
+              "rate_limited",
+              "internal",
+              "possible_duplicate",
+              "already_linked",
+              "already_exists",
+              "stale_revert"
+            ],
+            "description": "Machine code. `already_exists` is admin-only (POST /admin/webhooks). `stale_revert` is admin-only (POST /admin/changes/{seq}/revert, 422)."
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Code-specific: `current` (version_conflict, the latest entity), `candidates` (possible_duplicate), `masjid_id`/`event_id`/`app_id`/`external_id` (already_linked), `merged_into`, `header`, `field`, `reason`."
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ]
+      },
+      "ExternalId": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "external_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id",
+          "external_id"
+        ]
+      },
+      "Contact": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "facebook",
+              "instagram",
+              "twitter",
+              "youtube",
+              "whatsapp",
+              "tiktok",
+              "threads",
+              "website"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ]
+      },
+      "Facility": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "From GET /facilities"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "false = confirmed not available; an absent code = unknown"
+          }
+        },
+        "required": [
+          "code",
+          "available"
+        ]
+      },
+      "Image": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Full HTTPS URL hosted by the sending app"
+          },
+          "is_thumbnail": {
+            "type": "boolean"
+          },
+          "sort_order": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "url",
+          "is_thumbnail",
+          "sort_order"
+        ]
+      },
+      "Masjid": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type_id": {
+            "type": "string",
+            "enum": [
+              "masjid",
+              "surau",
+              "mini-surau"
+            ]
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          },
+          "geohash": {
+            "type": "string",
+            "description": "Computed by the server"
+          },
+          "country_id": {
+            "type": "string"
+          },
+          "state_id": {
+            "type": "string"
+          },
+          "city_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jumaat_available": {
+            "type": "boolean"
+          },
+          "telephone": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "email": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "google_url": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Contact"
+            }
+          },
+          "facilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Facility"
+            }
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Image"
+            }
+          },
+          "external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "deleted",
+              "merged"
+            ]
+          },
+          "merged_into": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_by_app": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "name",
+          "type_id",
+          "lat",
+          "lng",
+          "geohash",
+          "country_id",
+          "state_id",
+          "city_id",
+          "address",
+          "description",
+          "jumaat_available",
+          "telephone",
+          "email",
+          "google_url",
+          "contacts",
+          "facilities",
+          "images",
+          "external_ids",
+          "status",
+          "merged_into",
+          "updated_by_app",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "MasjidWithDistance": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Masjid"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "distance_m": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "distance_m"
+            ]
+          }
+        ]
+      },
+      "MasjidCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type_id": {
+            "type": "string",
+            "enum": [
+              "masjid",
+              "surau",
+              "mini-surau"
+            ]
+          },
+          "lat": {
+            "type": "number",
+            "description": "Full-precision WGS84. Never round."
+          },
+          "lng": {
+            "type": "number"
+          },
+          "country_id": {
+            "type": "string"
+          },
+          "state_id": {
+            "type": "string"
+          },
+          "city_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jumaat_available": {
+            "type": "boolean"
+          },
+          "telephone": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "email": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "google_url": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "is_thumbnail": {
+                  "type": "boolean"
+                },
+                "sort_order": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            }
+          },
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Contact"
+            }
+          },
+          "facilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Facility"
+            }
+          },
+          "external_id": {
+            "type": "string",
+            "description": "Your id for this masjid; linked in the same write"
+          }
+        },
+        "required": [
+          "name",
+          "type_id",
+          "lat",
+          "lng",
+          "state_id",
+          "country_id"
+        ]
+      },
+      "MasjidPatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type_id": {
+            "type": "string",
+            "enum": [
+              "masjid",
+              "surau",
+              "mini-surau"
+            ]
+          },
+          "lat": {
+            "type": "number",
+            "description": "Full-precision WGS84. Never round."
+          },
+          "lng": {
+            "type": "number"
+          },
+          "country_id": {
+            "type": "string"
+          },
+          "state_id": {
+            "type": "string"
+          },
+          "city_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jumaat_available": {
+            "type": "boolean"
+          },
+          "telephone": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "email": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "google_url": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "is_thumbnail": {
+                  "type": "boolean"
+                },
+                "sort_order": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "url"
+              ]
+            }
+          },
+          "contacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "facebook",
+                    "instagram",
+                    "twitter",
+                    "youtube",
+                    "whatsapp",
+                    "tiktok",
+                    "threads",
+                    "website"
+                  ]
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "value"
+              ]
+            },
+            "description": "Upserts by type; value null deletes it."
+          },
+          "facilities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "available": {
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "available"
+              ]
+            },
+            "description": "Upserts by code; available null deletes it. Retired codes can be cleared, not set."
+          }
+        },
+        "description": "Only the fields that changed. `images`, when present, replace the whole list."
+      },
+      "LinkBody": {
+        "type": "object",
+        "properties": {
+          "external_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          }
+        },
+        "required": [
+          "external_id"
+        ]
+      },
+      "Programme": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "masjid_id": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "kuliah",
+              "ceramah",
+              "tazkirah",
+              "kelas",
+              "qiamullail",
+              "gotong_royong",
+              "sukan",
+              "majlis",
+              "program_belia",
+              "korban",
+              "iftar",
+              "jualan",
+              "lain"
+            ]
+          },
+          "speaker": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA name",
+            "default": "Asia/Kuala_Lumpur"
+          },
+          "rrule": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "RFC 5545 RRULE without the RRULE: prefix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "cancelled",
+              "completed",
+              "deleted"
+            ]
+          },
+          "poster_url": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "registration_url": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            }
+          },
+          "source_app": {
+            "type": "string"
+          },
+          "updated_by_app": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "masjid_id",
+          "title",
+          "description",
+          "category",
+          "speaker",
+          "start_at",
+          "end_at",
+          "timezone",
+          "rrule",
+          "status",
+          "poster_url",
+          "registration_url",
+          "external_ids",
+          "source_app",
+          "updated_by_app",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "ProgrammeCreate": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "kuliah",
+              "ceramah",
+              "tazkirah",
+              "kelas",
+              "qiamullail",
+              "gotong_royong",
+              "sukan",
+              "majlis",
+              "program_belia",
+              "korban",
+              "iftar",
+              "jualan",
+              "lain"
+            ]
+          },
+          "speaker": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339, `Z` or an offset; stored as UTC"
+          },
+          "end_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "rrule": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "poster_url": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "https://"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "registration_url": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "https://"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "start_at"
+        ]
+      },
+      "ProgrammePatch": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "kuliah",
+              "ceramah",
+              "tazkirah",
+              "kelas",
+              "qiamullail",
+              "gotong_royong",
+              "sukan",
+              "majlis",
+              "program_belia",
+              "korban",
+              "iftar",
+              "jualan",
+              "lain"
+            ]
+          },
+          "speaker": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339, `Z` or an offset; stored as UTC"
+          },
+          "end_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "rrule": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "poster_url": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "https://"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "registration_url": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "https://"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "cancelled",
+              "completed"
+            ],
+            "description": "Use DELETE to delete"
+          }
+        },
+        "description": "Changed fields only."
+      },
+      "MatchCandidate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type_id": {
+            "type": "string"
+          },
+          "same_type": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            }
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "distance_m": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type_id",
+          "same_type",
+          "lat",
+          "lng",
+          "address",
+          "external_ids",
+          "score",
+          "distance_m"
+        ]
+      },
+      "Change": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer"
+          },
+          "entity": {
+            "type": "string",
+            "enum": [
+              "masjid",
+              "event"
+            ],
+            "description": "More values may be added; ignore unknown ones"
+          },
+          "entity_id": {
+            "type": "integer"
+          },
+          "masjid_id": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "delete",
+              "merge"
+            ]
+          },
+          "version": {
+            "type": "integer"
+          },
+          "origin_app": {
+            "type": "string"
+          },
+          "changed_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "data": {
+            "description": "Full entity after the change, same shape as GET, plus the optional extra keys in `ChangeDataExtras`. An admin's merge `reason` is never included.",
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Masjid"
+                  },
+                  {
+                    "$ref": "#/components/schemas/Programme"
+                  }
+                ]
+              },
+              {
+                "$ref": "#/components/schemas/ChangeDataExtras"
+              }
+            ]
+          }
+        },
+        "required": [
+          "seq",
+          "entity",
+          "entity_id",
+          "masjid_id",
+          "op",
+          "version",
+          "origin_app",
+          "changed_fields",
+          "occurred_at",
+          "data"
+        ]
+      },
+      "ChangesPage": {
+        "type": "object",
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Change"
+            }
+          },
+          "next_after": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "changes",
+          "next_after",
+          "has_more"
+        ]
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "country_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "country_id"
+        ]
+      },
+      "City": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state_id"
+        ]
+      },
+      "FacilityCatalogueItem": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "label_en": {
+            "type": "string"
+          },
+          "label_ms": {
+            "type": "string"
+          },
+          "sort_order": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "label_en",
+          "label_ms",
+          "sort_order"
+        ]
+      },
+      "WebhookRegistration": {
+        "type": "object",
+        "properties": {
+          "api_key_id": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string",
+            "description": "https:// only"
+          }
+        },
+        "required": [
+          "api_key_id",
+          "url"
+        ]
+      },
+      "Webhook": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "api_key_id": {
+            "type": "integer"
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "delivery_status": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "delivered",
+                  "dropped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_seq": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempts": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_error": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "api_key_id",
+          "app_id",
+          "url",
+          "active",
+          "created_at"
+        ]
+      },
+      "WebhookCreated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "api_key_id": {
+            "type": "integer"
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string",
+            "description": "`whsec_...`, shown once"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "api_key_id",
+          "app_id",
+          "url",
+          "secret",
+          "active",
+          "created_at"
+        ]
+      },
+      "MasjidSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lat": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lng": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "address": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "deleted",
+              "merged",
+              "missing"
+            ]
+          },
+          "external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type_id",
+          "lat",
+          "lng",
+          "address",
+          "status",
+          "external_ids"
+        ]
+      },
+      "Duplicate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "merged",
+              "dismissed"
+            ]
+          },
+          "score": {
+            "type": "number"
+          },
+          "distance_m": {
+            "type": "integer"
+          },
+          "same_type": {
+            "type": "boolean"
+          },
+          "masjid_a": {
+            "$ref": "#/components/schemas/MasjidSummary"
+          },
+          "masjid_b": {
+            "$ref": "#/components/schemas/MasjidSummary"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "description": "`masjid_a` < `masjid_b` by id. Produced by the hourly scan.",
+        "required": [
+          "id",
+          "status",
+          "score",
+          "distance_m",
+          "same_type",
+          "masjid_a",
+          "masjid_b",
+          "created_at",
+          "resolved_at"
+        ]
+      },
+      "MergeRequest": {
+        "type": "object",
+        "properties": {
+          "into": {
+            "type": "integer",
+            "description": "Survivor masjid id"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "into"
+        ]
+      },
+      "DuplicateMergeRequest": {
+        "type": "object",
+        "properties": {
+          "into": {
+            "type": "integer",
+            "description": "Must be `masjid_a` or `masjid_b`"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "into"
+        ]
+      },
+      "ChangeDataExtras": {
+        "type": "object",
+        "description": "Optional extra keys a change's `data` may carry besides the entity fields. Ignore unknown keys.",
+        "properties": {
+          "via_merge": {
+            "type": "integer",
+            "description": "The change was made by merging this masjid id into another (survivor update, moved programme update)."
+          },
+          "moved_external_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExternalId"
+            },
+            "description": "On a `merge` change: the external ids that moved to the survivor."
+          },
+          "merged_into": {
+            "type": "integer",
+            "description": "On a `merge` change: the survivor id."
+          },
+          "forced": {
+            "type": "boolean",
+            "description": "Set when an admin reverted despite later changes to the same fields."
+          }
+        }
+      },
+      "ScanStatus": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "object",
+            "properties": {
+              "updated_at": {
+                "type": "string"
+              },
+              "id": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "updated_at",
+              "id"
+            ],
+            "description": "Every masjid up to this (updated_at, id) has been scanned."
+          },
+          "last_run_at": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Start time of the last run (written before any work, so a killed run keeps it)."
+          },
+          "last_run_scanned": {
+            "type": "integer",
+            "description": "Masjids fully processed in the last run."
+          },
+          "last_run_queued": {
+            "type": "integer",
+            "description": "Pairs newly queued in the last run."
+          },
+          "last_error": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`running` while a run is in flight (and for good if it was killed by the CPU limit); the message of the last failed run; null after a clean run."
+          },
+          "masjids_remaining": {
+            "type": "integer",
+            "description": "Active masjids after the cursor."
+          },
+          "max_masjids_per_run": {
+            "type": "integer"
+          },
+          "stalled": {
+            "type": "boolean",
+            "description": "True when `last_error` is `running` and `last_run_at` is more than 15 minutes old (the run was killed before it could record anything)."
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "description": "Runs started on the current cursor that did not advance it. At 3 the next run scans one masjid at a time. Reset when the cursor advances."
+          },
+          "skipped_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Masjids skipped as poisoned (still failing when scanned alone), newest last, at most 100."
+          }
+        },
+        "required": [
+          "cursor",
+          "last_run_at",
+          "last_run_scanned",
+          "last_run_queued",
+          "last_error",
+          "masjids_remaining",
+          "max_masjids_per_run",
+          "stalled",
+          "consecutive_failures",
+          "skipped_ids"
+        ]
       }
     }
   }

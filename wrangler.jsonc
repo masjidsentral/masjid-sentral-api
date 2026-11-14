@@ -7,6 +7,14 @@
     "IMAGES_ACCOUNT_ID": "PENDING",
     "IMAGES_DELIVERY_URL": "https://imagedelivery.net/PENDING"
   },
+  "triggers": { "crons": ["* * * * *", "0 * * * *"] },
+  "ratelimits": [
+    {
+      "name": "RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 600, "period": 60 }
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

@@ -173,7 +173,7 @@ All require `read`. Writes also require `write`.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/masjids/{id}/events?from&to` | Programmes with `status` `active` or `cancelled` whose first occurrence starts before `to` and that either repeat or have not ended before `from`. Defaults: `from` = now, `to` = now + 90 days. Ordered by `start_at, id`. Repeating programmes are returned once (expand them client-side). |
+| GET | `/masjids/{id}/events?from&to` | A merged masjid → `301` to the survivor's list. Programmes with `status` `active` or `cancelled` whose first occurrence starts before `to` and that either repeat or have not ended before `from`. Defaults: `from` = now, `to` = now + 90 days. Ordered by `start_at, id`. Repeating programmes are returned once (expand them client-side). |
 | GET | `/events?masjid_ids=1,2,3&from&to` | Up to 100 masjids per call |
 | GET | `/events/{id}` | |
 | GET | `/events/by-external/{app_id}/{external_id}` | Whatever its status |
@@ -229,7 +229,8 @@ All require `read`. Writes also require `write`.
 - `op`: `create` | `update` | `delete` | `merge`.
 - `data` is the full entity after the change. On `delete` it holds the tombstone (`status: deleted`).
 - Your own writes appear in the feed too. R2 skips them.
-- The feed is kept for 90 days. If `after` is older than that you get `410 code: cursor_expired`: run a full resync (§9 step 2), then continue from `latest_seq`.
+- v1.1 keeps the whole feed (nothing is pruned). `410 code: cursor_expired` is reserved for a future retention limit: if you ever get it, run a full resync (§9 step 2), then continue from `latest_seq`.
+- `data` may carry extra keys beyond the GET shape (`via_merge`, `moved_external_ids`, `forced`); ignore what you don't use (R10).
 - `GET /changes/latest` returns `{ "latest_seq": n }`. Use it to start the cursor after your first full sync.
 
 ### 6.2 Cursor
@@ -255,7 +256,7 @@ save_cursor(page.next_after)
 
 ### 6.4 Merge
 
-`op: "merge"`, `entity: "masjid"`, `entity_id` = the **removed** duplicate, `data.merged_into` = the survivor id. Point your local link at the survivor, then fetch the survivor. If you held both locally, merge them with your own app rules (for example, move check-ins). Programmes of the removed masjid arrive as separate `event` `update` changes with the new `masjid_id`.
+A merge emits, in this order: the `merge` change on the **removed** masjid (`entity_id`, `data.merged_into` = survivor id, `data.moved_external_ids`, `data.external_ids` = `[]`), then one `event` `update` per moved programme (new `masjid_id`), then an `update` on the survivor (`changed_fields: ["external_ids"]`). On the `merge`: point your local link at the survivor, fetch it with `GET /masjids/{survivor}`, and set `sentral_version` from that fetched record. A survivor may then hold two ids from your app; `by-external` returns the survivor for either. If you held both locally, merge them with your own app rules (for example, move check-ins). Programmes of the removed masjid arrive as separate `event` `update` changes with the new `masjid_id`.
 
 ---
 
@@ -283,7 +284,7 @@ X-Sentral-Delivery: dlv_01JD…
 
 - Any app key with `write` may edit any masjid or programme. Writes go live straight away for every app.
 - Each app moderates its **own users** before sending (R7): reports, review queues, trust levels, photo rules. Sentral does not re-moderate.
-- Every write is audited (`app_id`, `X-Sentral-Actor`, before/after, time). Maintainers can revert a change. A revert arrives in your feed as a normal `update` with a higher `version`.
+- Every write is audited (`app_id`, `X-Sentral-Actor`, before/after, time). Maintainers can revert a change. A revert is field-level (only the fields that change touched) and arrives in your feed as a normal change with a higher `version`: reverting an edit is an `update`, reverting a create is a `delete`, reverting a delete is an `update` back to `active`. Merges cannot be reverted in v1.1.
 - Programmes: you MAY edit a programme created by another app (for example, to cancel it). Prefer leaving another app's programme alone unless your user is that masjid's committee.
 - Abuse from one app's users is that app's responsibility. Its key can be suspended.
 
@@ -327,6 +328,7 @@ X-Sentral-Delivery: dlv_01JD…
 - Final programme `category` list (§4.2 is the union of both apps' lists).
 - Masjid types: JM also has `institution` (university, hospital, office prayer spaces). Add it or map it to `surau`.
 - Facility state: JM tracks confirmed / unconfirmed / disputed per facility; Sentral has only available yes / no / unknown. Agree which states count as `true`.
+- Check that production reference data (`countries`, `states`, `cities`, `masjid_types` incl. `mini-surau`) matches the schema repo before the rebuild.
 - Sentral server prerequisites before any key is issued: remove the dev test key seeded in migration `002_api_keys.sql`, and confirm what the prod D1 holds.
 - Staging URL, key issue and webhook registration.
 - Data licence: each app's terms must allow user-contributed masjid and programme data to be shared with the partner app.
