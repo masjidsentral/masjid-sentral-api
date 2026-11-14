@@ -6,6 +6,8 @@ import { statesRouter } from './routes/states'
 import { citiesRouter } from './routes/cities'
 import { changesRouter } from './routes/changes'
 import { adminRouter } from './routes/admin'
+import { eventsRouter } from './routes/events'
+import { facilitiesRouter } from './routes/facilities'
 import { dispatchDue, purgeIdempotency } from './lib/webhooks'
 import { authMiddleware, requireScope, writeGuard, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
@@ -34,6 +36,8 @@ app.route('/masjids', masjidsRouter)
 app.route('/states', statesRouter)
 app.route('/cities', citiesRouter)
 app.route('/changes', changesRouter)
+app.route('/events', eventsRouter)
+app.route('/facilities', facilitiesRouter)
 app.route('/admin', adminRouter)
 
 // Error shape: { error, code, details? } (contract §1). No stack traces in responses.

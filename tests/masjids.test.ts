@@ -6,18 +6,12 @@ import { readHeaders } from './helpers'
 // Covers: APIREAD-01, APIREAD-02..06, APIREAD-10, APIREAD-11
 
 describe('GET /masjids', () => {
-  it('returns { data, meta } envelope with per_page 20 (APIREAD-01, APIREAD-11)', async () => {
+  it('returns { data, next_cursor } with the contract masjid shape', async () => {
     const response = await SELF.fetch('http://example.com/masjids', { headers: readHeaders() })
     expect(response.status).toBe(200)
-    const body = await response.json() as {
-      data: unknown[]
-      meta: { total: number; page: number; per_page: number }
-    }
+    const body = await response.json() as { data: unknown[]; next_cursor: string | null }
     expect(Array.isArray(body.data)).toBe(true)
-    expect(typeof body.meta).toBe('object')
-    expect(body.meta.per_page).toBe(20)
-    expect(typeof body.meta.total).toBe('number')
-    expect(typeof body.meta.page).toBe('number')
+    expect('next_cursor' in body).toBe(true)
   })
 
   it('filters by ?state= (APIREAD-02)', async () => {
@@ -57,9 +51,9 @@ describe('GET /masjids', () => {
   it('filters by ?jumaat=1 (APIREAD-06)', async () => {
     const response = await SELF.fetch('http://example.com/masjids?jumaat=1', { headers: readHeaders() })
     expect(response.status).toBe(200)
-    const body = await response.json() as { data: Array<{ jumaat_available: number }> }
+    const body = await response.json() as { data: Array<{ jumaat_available: boolean }> }
     for (const row of body.data) {
-      expect(row.jumaat_available).toBe(1)
+      expect(row.jumaat_available).toBe(true)
     }
   })
 

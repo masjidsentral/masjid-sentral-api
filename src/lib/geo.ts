@@ -29,3 +29,27 @@ export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: numb
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
+
+/** Haversine distance in metres. */
+export function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  return haversineKm(lat1, lng1, lat2, lng2) * 1000
+}
+
+/**
+ * Index-friendly geohash cell ranges (centre cell + 8 neighbours) that cover a circle of `radiusM`
+ * around the point. The cell size is chosen so a neighbour ring always reaches the radius
+ * (5 chars ~4.9 km, 4 chars ~19.5 km, 3 chars ~156 km).
+ */
+export function geohashRanges(lat: number, lng: number, radiusM: number): Array<[string, string]> {
+  const len = radiusM <= 4000 ? 5 : radiusM <= 15000 ? 4 : 3
+  const centre = ngeohash.encode(lat, lng, len)
+  // '~' sorts after every geohash character, so [p, p~) is exactly "starts with p" on the plain index.
+  return [centre, ...ngeohash.neighbors(centre)].map(p => [p, `${p}~`])
+}
+
+export function geohashWhere(ranges: Array<[string, string]>): { sql: string; binds: string[] } {
+  return {
+    sql: `(${ranges.map(() => '(geohash >= ? AND geohash < ?)').join(' OR ')})`,
+    binds: ranges.flat(),
+  }
+}

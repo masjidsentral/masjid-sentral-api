@@ -29,7 +29,7 @@ async function keyId(name: keyof typeof KEYS): Promise<number> {
 
 describe('create', () => {
   it('returns the full contract entity, version 1, and writes one create change with matching after_json', async () => {
-    const m = await createMasjid({ images: [{ url: 'https://img.example/a.jpg', is_thumbnail: true }] })
+    const m = await createMasjid({ lat: 5.4141, lng: 100.3288, images: [{ url: 'https://img.example/a.jpg', is_thumbnail: true }] }, undefined, { force: false })
     expect(m.version).toBe(1)
     expect(m.updated_by_app).toBe('jejak_masjid')
     expect(m.geohash).toHaveLength(9)
@@ -50,7 +50,7 @@ describe('create', () => {
   it('requires an Idempotency-Key (422) and writes nothing without it', async () => {
     const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>()
     const { 'Idempotency-Key': _k, ...headers } = writeHeaders()
-    const res = await SELF.fetch(`${BASE}/masjids`, { method: 'POST', headers, body: JSON.stringify(MASJID_BODY) })
+    const res = await SELF.fetch(`${BASE}/masjids?force=true`, { method: 'POST', headers, body: JSON.stringify(MASJID_BODY) })
     expect(res.status).toBe(422)
     expect(await res.json()).toMatchObject({ code: 'validation_failed', details: { header: 'Idempotency-Key' } })
     const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM changes').first<{ n: number }>()
@@ -68,7 +68,7 @@ describe('create', () => {
 describe('idempotency', () => {
   it('replays an identical body for the same key + same request', async () => {
     const key = `idem-create-${crypto.randomUUID()}`
-    const send = () => SELF.fetch(`${BASE}/masjids`, {
+    const send = () => SELF.fetch(`${BASE}/masjids?force=true`, {
       method: 'POST',
       headers: writeHeaders(KEYS.jm.token, 'user-1', { 'Idempotency-Key': key }),
       body: JSON.stringify({ ...MASJID_BODY, name: 'Idem Create' }),
@@ -111,7 +111,7 @@ describe('idempotency', () => {
 
   it('keys are scoped per API key', async () => {
     const key = `shared-${crypto.randomUUID()}`
-    const mk = (token: string) => SELF.fetch(`${BASE}/masjids`, {
+    const mk = (token: string) => SELF.fetch(`${BASE}/masjids?force=true`, {
       method: 'POST',
       headers: writeHeaders(token, 'user-1', { 'Idempotency-Key': key }),
       body: JSON.stringify({ ...MASJID_BODY, name: `Scoped ${token === KEYS.jm.token ? 'jm' : 'qiyam'}` }),

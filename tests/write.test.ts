@@ -17,7 +17,7 @@ const VALID_POST_BODY = {
 
 describe('POST /masjids', () => {
   it('returns 201 with created resource (APIWRITE-01)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids', {
+    const response = await SELF.fetch('http://example.com/masjids?force=true', {
       method: 'POST',
       headers: writeHeaders(),
       body: JSON.stringify(VALID_POST_BODY),
@@ -36,7 +36,7 @@ describe('POST /masjids', () => {
 describe('PATCH /masjids/:id', () => {
   it('returns 200 with updated resource including updated_at (APIWRITE-02, APIWRITE-05)', async () => {
     // First create a masjid via POST
-    const postResponse = await SELF.fetch('http://example.com/masjids', {
+    const postResponse = await SELF.fetch('http://example.com/masjids?force=true', {
       method: 'POST',
       headers: writeHeaders(),
       body: JSON.stringify(VALID_POST_BODY),
@@ -69,7 +69,7 @@ describe('PATCH /masjids/:id', () => {
 
 describe('Auth middleware', () => {
   it('POST /masjids with no Authorization header returns 401 (APIWRITE-03, APIWRITE-04)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids', {
+    const response = await SELF.fetch('http://example.com/masjids?force=true', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -83,7 +83,7 @@ describe('Auth middleware', () => {
   })
 
   it('POST /masjids with invalid Bearer token returns 401 (APIWRITE-03, APIWRITE-04, APIWRITE-06)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids', {
+    const response = await SELF.fetch('http://example.com/masjids?force=true', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer invalid-key-xyz',

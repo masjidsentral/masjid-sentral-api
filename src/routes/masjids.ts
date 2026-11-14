@@ -1,22 +1,29 @@
-// Masjid routes — GET /masjids (list+filters), GET /masjids/nearby, GET /masjids/:id,
-//                  POST /masjids (create), PATCH /masjids/:id (update)
-
 import { Hono } from 'hono'
 import ngeohash from 'ngeohash'
-import type { MasjidRow } from '../types/db'
-import { geohashPrefixes, haversineKm } from '../lib/geo'
-import type { AppEnv } from '../middleware/auth'
-import { ApiError, errorBody } from '../lib/errors'
-import { loadMasjid, normaliseImages, type MasjidEntity } from '../lib/entities'
-import { beginWrite, commitWrite, replayOnConflict, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec } from '../lib/write'
+import { geohashRanges, geohashWhere, haversineM } from '../lib/geo'
+import { requireScope, type AppEnv } from '../middleware/auth'
+import { ApiError } from '../lib/errors'
+import {
+  hydrateMasjids, loadMasjid, loadMasjidsByIds, MASJID_COLUMNS, normaliseImages, type MasjidEntity, type MasjidScalars,
+} from '../lib/entities'
+import {
+  beginWrite, commitWrite, replayOnConflict, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec,
+} from '../lib/write'
 import { isoNow } from '../lib/time'
+import { CONTACT_TYPES } from '../lib/constants'
+import { decodeCursor, encodeCursor, intParam, invalid, normaliseInstant } from '../lib/page'
+import { findCandidates } from '../lib/match'
+import { registerMasjidEventRoutes } from './events'
 
 export const masjidsRouter = new Hono<AppEnv>()
 
-// ─── GET /masjids ── paginated filterable list ─────────────────────────────
+// Every read needs the `read` scope (contract section 5); writes are checked by writeGuard.
+masjidsRouter.use('*', async (c, next) => (c.req.method === 'GET' ? requireScope('read')(c, next) : next()))
+
+const LIST_DEFAULT_LIMIT = 20
+const LIST_MAX_LIMIT = 100
 
 masjidsRouter.get('/', async (c) => {
-  // Build dynamic WHERE conditions — always seed with soft-delete filter (APIREAD-10)
   const conditions: string[] = ["status = 'active'"]
   const params: (string | number)[] = []
 
@@ -30,122 +37,107 @@ masjidsRouter.get('/', async (c) => {
   if (type) { conditions.push('type_id = ?'); params.push(type.toLowerCase()) }
 
   const jumaat = c.req.query('jumaat')
-  if (jumaat === '1') { conditions.push('jumaat_available = 1') }
+  if (jumaat === '1' || jumaat === 'true') conditions.push('jumaat_available = 1')
+  else if (jumaat === '0' || jumaat === 'false') conditions.push('jumaat_available = 0')
 
-  const q = c.req.query('q')
-  if (q) {
-    // Escape LIKE wildcards before binding; ESCAPE clause tells SQLite to treat \% and \_ literally
-    const safe = q.slice(0, 48).replace(/%/g, '\\%').replace(/_/g, '\\_') // D1 LIKE limit: 50 bytes; '%..%' uses 2 (Pitfall 4)
+  const name = c.req.query('name') ?? c.req.query('q')
+  if (name) {
+    const safe = name.slice(0, 48).replace(/[\\%_]/g, '\\$&') // D1 LIKE pattern limit is 50 bytes; '%..%' uses 2
     conditions.push("name LIKE ? ESCAPE '\\'")
     params.push(`%${safe}%`)
   }
 
-  const where = conditions.join(' AND ')
-
-  // Pagination — default page 1, always 20 per page
-  // Use Number() so scientific notation (e.g. '1e5') parses correctly; Math.floor guards floats
-  const pageRaw = Number(c.req.query('page') ?? '1')
-  const page = isNaN(pageRaw) || pageRaw < 1 ? 1 : Math.floor(pageRaw)
-  const perPage = 20
-  const offset = (page - 1) * perPage
-
-  // Single D1 round-trip via batch() — count + data (Pattern 2, APIREAD-11)
-  const [countResult, dataResult] = await c.env.DB.batch([
-    c.env.DB.prepare(`SELECT COUNT(*) as total FROM masjids WHERE ${where}`)
-      .bind(...params),
-    c.env.DB.prepare(
-      `SELECT id, name, type_id, state_id, city_id, country_id,
-        address, lat, lng, jumaat_available, status, version, created_at, updated_at
-       FROM masjids WHERE ${where}
-       ORDER BY id ASC LIMIT ? OFFSET ?`
-    ).bind(...params, perPage, offset),
-  ])
-
-  const total = (countResult.results[0] as { total: number }).total
-  const masjids = dataResult.results as MasjidRow[]
-
-  // Fetch thumbnails for this page's masjids (Pitfall 6 — always emit thumbnail_url key)
-  const ids = masjids.map(m => m.id)
-  let thumbnailMap: Record<number, string> = {}
-
-  if (ids.length > 0) {
-    // Build placeholders for IN clause — parameterized, no string interpolation (T-02-01)
-    const placeholders = ids.map(() => '?').join(', ')
-    const imageResult = await c.env.DB.prepare(
-      `SELECT masjid_id, url FROM masjid_images
-       WHERE masjid_id IN (${placeholders}) AND is_thumbnail = 1
-       ORDER BY masjid_id ASC, sort_order ASC`
-    ).bind(...ids).run<{ masjid_id: number; url: string }>()
-
-    // Take first thumbnail per masjid (lowest sort_order, due to ORDER BY)
-    for (const img of imageResult.results) {
-      if (!(img.masjid_id in thumbnailMap)) {
-        thumbnailMap[img.masjid_id] = img.url
-      }
-    }
+  const sinceRaw = c.req.query('updated_since')
+  if (sinceRaw !== undefined && sinceRaw !== '') {
+    const since = normaliseInstant(sinceRaw)
+    if (!since) invalid('updated_since must be an ISO 8601 UTC time ending in Z', 'updated_since')
+    conditions.push('updated_at >= ?')
+    params.push(since)
   }
 
-  const data = masjids.map(m => ({
-    ...m,
-    thumbnail_url: thumbnailMap[m.id] ?? null,
-  }))
+  const limit = intParam(c.req.query('limit'), 'limit', LIST_DEFAULT_LIMIT, 1, LIST_MAX_LIMIT)
+  const after = decodeCursor(c.req.query('cursor'))
+  if (after !== null) {
+    if (!/^\d{1,15}$/.test(after)) invalid('cursor is not valid', 'cursor')
+    conditions.push('id > ?')
+    params.push(Number(after))
+  }
 
-  return c.json({ data, meta: { total, page, per_page: perPage } })
+  const rows = await c.env.DB
+    .prepare(`SELECT ${MASJID_COLUMNS} FROM masjids WHERE ${conditions.join(' AND ')} ORDER BY id ASC LIMIT ?`)
+    .bind(...params, limit + 1)
+    .all<MasjidScalars>()
+
+  const page = rows.results.slice(0, limit)
+  const data = await hydrateMasjids(c.env.DB, page)
+  const next_cursor = rows.results.length > limit ? encodeCursor(String(page[page.length - 1].id)) : null
+  return c.json({ data, next_cursor })
 })
 
-// ─── GET /masjids/nearby ── proximity search ──────────────────────────────
-// CRITICAL: Must be registered BEFORE /:id — Hono matches in registration order (Pitfall 3)
+function requireLatLng(c: { req: { query(name: string): string | undefined } }): { lat: number; lng: number } {
+  const latRaw = c.req.query('lat')
+  const lngRaw = c.req.query('lng')
+  const lat = latRaw === undefined || latRaw.trim() === '' ? NaN : Number(latRaw)
+  const lng = lngRaw === undefined || lngRaw.trim() === '' ? NaN : Number(lngRaw)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) invalid('Missing or invalid lat and lng', 'lat')
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) invalid('Invalid lat/lng range', 'lat')
+  return { lat, lng }
+}
 
+const NEARBY_DEFAULT_RADIUS_M = 5000
+const NEARBY_MAX_RADIUS_M = 20000
+
+// Nearby: radius in METRES (contract 5.1), nearest first, `limit` + offset `cursor`, rows carry `distance_m`.
 masjidsRouter.get('/nearby', async (c) => {
-  const lat = parseFloat(c.req.query('lat') ?? '')
-  const lng = parseFloat(c.req.query('lng') ?? '')
-  // Use explicit empty-string guard so '?radius=' or '?radius=abc' does not silently become NaN
+  const { lat, lng } = requireLatLng(c)
   const radiusRaw = c.req.query('radius')
-  const radius = radiusRaw !== undefined && radiusRaw !== '' ? parseFloat(radiusRaw) : 5
-
-  // Validate presence — isNaN when param missing or non-numeric (T-02-04)
-  if (isNaN(lat) || isNaN(lng)) {
-    return c.json(errorBody('Missing required param: lat, lng', 'validation_failed'), 422)
+  let radius = NEARBY_DEFAULT_RADIUS_M
+  if (radiusRaw !== undefined && radiusRaw !== '') {
+    radius = Number(radiusRaw)
+    if (!Number.isFinite(radius) || radius <= 0) invalid('radius (metres) must be greater than 0', 'radius')
+    if (radius > NEARBY_MAX_RADIUS_M) invalid('radius exceeds the maximum of 20000 metres', 'radius')
   }
+  const limit = intParam(c.req.query('limit'), 'limit', LIST_DEFAULT_LIMIT, 1, LIST_MAX_LIMIT)
+  const offsetRaw = decodeCursor(c.req.query('cursor'))
+  if (offsetRaw !== null && !/^\d{1,6}$/.test(offsetRaw)) invalid('cursor is not valid', 'cursor')
+  const offset = offsetRaw === null ? 0 : Number(offsetRaw)
 
-  // Validate ranges
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    return c.json(errorBody('Invalid lat/lng range', 'validation_failed'), 422)
-  }
+  const where = geohashWhere(geohashRanges(lat, lng, radius))
+  const near = await c.env.DB
+    .prepare(`SELECT id, lat, lng FROM masjids WHERE status = 'active' AND ${where.sql}`)
+    .bind(...where.binds)
+    .all<{ id: number; lat: number; lng: number }>()
 
-  // Validate radius — must be a positive number, capped at 20km (CR-01, WR-05, D-10)
-  if (isNaN(radius) || radius <= 0) {
-    return c.json(errorBody('Invalid radius: must be greater than 0', 'validation_failed'), 422)
-  }
-  if (radius > 20) {
-    return c.json(errorBody('Radius exceeds maximum of 20km', 'validation_failed'), 422)
-  }
+  const within = near.results
+    .map(r => ({ id: r.id, d: haversineM(lat, lng, r.lat, r.lng) }))
+    .filter(r => r.d <= radius)
+    .sort((a, b) => a.d - b.d || a.id - b.id)
 
-  // Geohash prefix search — 9 cells (center + 8 neighbors) at tiered precision (D-09)
-  const prefixes = geohashPrefixes(lat, lng, radius)
-  const likeConditions = prefixes.map(() => 'geohash LIKE ?').join(' OR ')
-  const likeParams = prefixes.map(p => `${p}%`)
-
-  const candidates = await c.env.DB.prepare(
-    `SELECT id, name, type_id, lat, lng, geohash, state_id, city_id,
-      country_id, address, jumaat_available, status, version, created_at, updated_at
-     FROM masjids WHERE status = 'active' AND (${likeConditions})
-     ORDER BY id ASC`
-  ).bind(...likeParams).run<MasjidRow>()
-
-  // Haversine filter to exact radius — geohash prefix may include cells slightly outside (D-09)
-  const results = candidates.results.filter(m =>
-    haversineKm(lat, lng, m.lat, m.lng) <= radius
-  )
-
-  return c.json({
-    data: results,
-    meta: { total: results.length, page: 1, per_page: results.length || 20 },
-  })
+  const slice = within.slice(offset, offset + limit)
+  const entities = await loadMasjidsByIds(c.env.DB, slice.map(r => r.id))
+  const dist = new Map(slice.map(r => [r.id, Math.round(r.d)]))
+  const data = entities.map(m => ({ ...m, distance_m: dist.get(m.id) ?? 0 }))
+  const next_cursor = offset + limit < within.length ? encodeCursor(String(offset + limit)) : null
+  return c.json({ data, next_cursor })
 })
 
-// ─── GET /masjids/:id ── full detail ─────────────────────────────────────
-// Must be registered AFTER /nearby (Pitfall 3)
+masjidsRouter.get('/match', async (c) => {
+  const { lat, lng } = requireLatLng(c)
+  const name = c.req.query('name')?.trim() ?? ''
+  if (name === '' || name.length > 200) invalid('name is required (1-200 characters)', 'name')
+  const candidates = (await findCandidates(c.env.DB, lat, lng, name)).slice(0, 5)
+  return c.json({ candidates })
+})
+
+masjidsRouter.get('/by-external/:app_id/:external_id', async (c) => {
+  const row = await c.env.DB
+    .prepare('SELECT masjid_id FROM masjid_external_ids WHERE app_id = ? AND external_id = ?')
+    .bind(c.req.param('app_id'), c.req.param('external_id'))
+    .first<{ masjid_id: number }>()
+  const masjid = row ? await loadMasjid(c.env.DB, row.masjid_id) : null
+  if (!masjid) throw new ApiError(404, 'not_found', 'No masjid is linked to that external id')
+  return c.json(masjid)
+})
 
 masjidsRouter.get('/:id', async (c) => {
   const id = parseId(c.req.param('id'))
@@ -153,14 +145,11 @@ masjidsRouter.get('/:id', async (c) => {
   const masjid = await loadMasjid(c.env.DB, id)
   if (!masjid) throw new ApiError(404, 'not_found', 'Masjid not found')
 
-  // A merged id points at the survivor; a deleted one returns its tombstone (contract 5.1, spec 4.8).
   if (masjid.status === 'merged' && masjid.merged_into !== null) {
     return c.redirect(`/masjids/${masjid.merged_into}`, 301)
   }
   return c.json(masjid)
 })
-
-// ─── writes (through the S2 write pipeline) ───────────────────────────────────
 
 function parseId(raw: string): number {
   if (!/^\d{1,15}$/.test(raw)) throw new ApiError(422, 'validation_failed', 'Invalid id', { field: 'id' })
@@ -253,6 +242,127 @@ function imageStatements(images: MasjidEntity['images'], now: string) {
     )
 }
 
+type ContactOp = { type: string; value: string | null }
+type FacilityOp = { code: string; available: boolean | null }
+
+/** contacts: an array of { type, value }; value null deletes that type (PATCH). */
+function validateContacts(raw: unknown): ContactOp[] {
+  if (!Array.isArray(raw) || raw.length > CONTACT_TYPES.length) invalid('contacts must be an array of { type, value }', 'contacts')
+  const seen = new Set<string>()
+  return (raw as unknown[]).map((item, i) => {
+    const o = item as { type?: unknown; value?: unknown }
+    if (typeof item !== 'object' || item === null) invalid(`contacts[${i}] must be an object`, 'contacts')
+    if (typeof o.type !== 'string' || !(CONTACT_TYPES as readonly string[]).includes(o.type)) {
+      invalid(`contacts[${i}].type must be one of ${CONTACT_TYPES.join(', ')}`, 'contacts')
+    }
+    if (seen.has(o.type)) invalid(`contacts lists "${o.type}" twice`, 'contacts')
+    seen.add(o.type)
+    if (o.value !== null && (typeof o.value !== 'string' || o.value.trim() === '' || o.value.length > 500)) {
+      invalid(`contacts[${i}].value must be a non-empty string of at most 500 characters, or null to delete`, 'contacts')
+    }
+    return { type: o.type, value: o.value === null ? null : (o.value as string).trim() }
+  })
+}
+
+/** facilities: an array of { code, available }; available null deletes that code (PATCH). Unknown code is a 422. */
+async function validateFacilities(db: D1Database, raw: unknown): Promise<FacilityOp[]> {
+  if (!Array.isArray(raw) || raw.length > 200) invalid('facilities must be an array of { code, available }', 'facilities')
+  const seen = new Set<string>()
+  const ops = (raw as unknown[]).map((item, i) => {
+    const o = item as { code?: unknown; available?: unknown }
+    if (typeof item !== 'object' || item === null) invalid(`facilities[${i}] must be an object`, 'facilities')
+    if (typeof o.code !== 'string' || o.code === '') invalid(`facilities[${i}].code must be a string`, 'facilities')
+    if (seen.has(o.code)) invalid(`facilities lists "${o.code}" twice`, 'facilities')
+    seen.add(o.code)
+    if (o.available !== null && typeof o.available !== 'boolean') {
+      invalid(`facilities[${i}].available must be true, false or null (clear)`, 'facilities')
+    }
+    return { code: o.code, available: o.available as boolean | null }
+  })
+  if (ops.length > 0) {
+    const known = await db
+      .prepare('SELECT code, active FROM facility_catalogue WHERE code IN (SELECT value FROM json_each(?))')
+      .bind(JSON.stringify(ops.map(o => o.code)))
+      .all<{ code: string; active: number }>()
+    const byCode = new Map(known.results.map(r => [r.code, r.active === 1]))
+    for (const op of ops) {
+      // A retired (inactive) code can still be cleared but not set.
+      if (!byCode.has(op.code) || (op.available !== null && byCode.get(op.code) === false)) {
+        throw new ApiError(422, 'validation_failed', `Unknown facility code: ${op.code}`, { field: 'facilities', code: op.code })
+      }
+    }
+  }
+  return ops
+}
+
+function applyContacts(current: MasjidEntity['contacts'], ops: ContactOp[]): MasjidEntity['contacts'] {
+  const map = new Map(current.map(c => [c.type, c.value]))
+  for (const op of ops) {
+    if (op.value === null) map.delete(op.type)
+    else map.set(op.type, op.value)
+  }
+  return [...map].map(([type, value]) => ({ type, value })).sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0))
+}
+
+function applyFacilities(current: MasjidEntity['facilities'], ops: FacilityOp[]): MasjidEntity['facilities'] {
+  const map = new Map(current.map(f => [f.code, f.available]))
+  for (const op of ops) {
+    if (op.available === null) map.delete(op.code)
+    else map.set(op.code, op.available)
+  }
+  return [...map].map(([code, available]) => ({ code, available })).sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+}
+
+type Builder = Parameters<NonNullable<WriteSpec['children']>>[0]
+
+function contactStatements(b: Builder, ops: ContactOp[]) {
+  return ops.map(op =>
+    op.value === null
+      ? b.stmt('DELETE FROM masjid_contacts WHERE masjid_id = {{ID}} AND type = ?', [op.type])
+      : b.stmt(
+        `INSERT INTO masjid_contacts (masjid_id, type, value) VALUES ({{ID}}, ?, ?)
+         ON CONFLICT (masjid_id, type) DO UPDATE SET value = excluded.value`,
+        [op.type, op.value],
+      ),
+  )
+}
+
+function facilityStatements(b: Builder, ops: FacilityOp[]) {
+  return ops.map(op =>
+    op.available === null
+      ? b.stmt('DELETE FROM masjid_facilities WHERE masjid_id = {{ID}} AND code = ?', [op.code])
+      : b.stmt(
+        `INSERT INTO masjid_facilities (masjid_id, code, available) VALUES ({{ID}}, ?, ?)
+         ON CONFLICT (masjid_id, code) DO UPDATE SET available = excluded.available`,
+        [op.code, op.available ? 1 : 0],
+      ),
+  )
+}
+
+export function validateExternalId(raw: unknown): string {
+  // eslint-disable-next-line no-control-regex
+  if (typeof raw !== 'string' || raw.trim() === '' || raw.length > 255 || /[\u0000-\u001f\u007f-\u009f]/.test(raw)) {
+    invalid('external_id must be a non-empty string of at most 255 characters', 'external_id')
+  }
+  return raw.trim()
+}
+
+function alreadyLinked(masjidId: number, appId: string, externalId: string): ApiError {
+  return new ApiError(409, 'already_linked', 'That external id is already linked to a masjid', {
+    masjid_id: masjidId, app_id: appId, external_id: externalId,
+  })
+}
+
+/** True when a thrown D1 error is a primary-key collision on masjid_external_ids (a racing link). */
+function isExternalIdCollision(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 4; depth++) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('UNIQUE') && msg.includes('masjid_external_ids')) return true
+    e = (e as { cause?: unknown }).cause
+  }
+  return false
+}
+
 const REQUIRED_ON_CREATE = ['name', 'type_id', 'state_id', 'country_id', 'lat', 'lng', 'address'] as const
 
 masjidsRouter.post('/', async (c) => {
@@ -260,69 +370,123 @@ masjidsRouter.post('/', async (c) => {
   if ('replay' in begin) return begin.replay
   const ctx: WriteCtx = begin.ctx
 
-  const body = parseJsonObject(ctx)
-  for (const field of REQUIRED_ON_CREATE) {
-    if (body[field] === undefined || body[field] === null || body[field] === '') fail(`Missing required field: ${field}`, field)
-  }
-  const s = validateScalars(body) as Required<Pick<Scalars, 'name' | 'type_id' | 'state_id' | 'country_id' | 'lat' | 'lng'>> & Scalars
-  const images = 'images' in body ? validateImages(body.images) : []
-  await checkReferences(ctx.db, s)
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    for (const field of REQUIRED_ON_CREATE) {
+      if (body[field] === undefined || body[field] === null || body[field] === '') fail(`Missing required field: ${field}`, field)
+    }
+    const s = validateScalars(body) as Required<Pick<Scalars, 'name' | 'type_id' | 'state_id' | 'country_id' | 'lat' | 'lng'>> & Scalars
+    const images = 'images' in body ? validateImages(body.images) : []
+    const contactOps = 'contacts' in body ? validateContacts(body.contacts) : []
+    const facilityOps = 'facilities' in body ? await validateFacilities(ctx.db, body.facilities) : []
+    const externalId = 'external_id' in body && body.external_id !== null ? validateExternalId(body.external_id) : null
+    await checkReferences(ctx.db, s)
 
-  const now = isoNow()
-  const geohash = ngeohash.encode(s.lat, s.lng, 9)
-  const after: MasjidEntity = {
-    id: 0, // placeholder: the real id is filled in by the batch
-    version: 1,
-    name: s.name,
-    type_id: s.type_id,
-    lat: s.lat,
-    lng: s.lng,
-    geohash,
-    country_id: s.country_id,
-    state_id: s.state_id,
-    city_id: s.city_id ?? null,
-    address: s.address ?? null,
-    description: s.description ?? null,
-    jumaat_available: s.jumaat_available ?? false,
-    telephone: s.telephone ?? null,
-    email: s.email ?? null,
-    google_url: s.google_url ?? null,
-    contacts: [],
-    facilities: [],
-    images,
-    external_ids: [],
-    status: 'active',
-    merged_into: null,
-    updated_by_app: ctx.originApp,
-    created_at: now,
-    updated_at: now,
-  }
+    if (externalId !== null) {
+      const linked = await ctx.db
+        .prepare('SELECT masjid_id FROM masjid_external_ids WHERE app_id = ? AND external_id = ?')
+        .bind(ctx.originApp, externalId)
+        .first<{ masjid_id: number }>()
+      if (linked) throw alreadyLinked(linked.masjid_id, ctx.originApp, externalId)
+    }
 
-  const entityStatement = ctx.db
-    .prepare(
-      `INSERT INTO masjids (version, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
-         address, description, telephone, email, google_url, jumaat_available, status, updated_by_app,
-         created_at, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-    )
-    .bind(
-      after.name, after.type_id, after.lat, after.lng, geohash, after.city_id, after.state_id, after.country_id,
-      after.address, after.description, after.telephone, after.email, after.google_url,
-      after.jumaat_available ? 1 : 0, ctx.originApp, now, now,
-    )
+    // Duplicate gate (spec 4.3): a >= 0.9 match within 50 m needs a person's ?force=true.
+    const forceRaw = c.req.query('force')
+    const force = forceRaw === 'true' || forceRaw === '1'
+    if (!force) {
+      const duplicates = (await findCandidates(ctx.db, s.lat, s.lng, s.name))
+        .filter(cand => cand.score >= 0.9 && cand.distance_m <= 50)
+        .slice(0, 5)
+      if (duplicates.length > 0) {
+        throw new ApiError(409, 'possible_duplicate', 'A masjid with a very similar name already exists at this spot', {
+          candidates: duplicates,
+        })
+      }
+    }
 
-  return commitWrite(c, ctx, {
-    entity: 'masjid',
-    op: 'create',
-    entityId: null,
-    baseVersion: null,
-    masjidId: null,
-    changedFields: Object.keys(body).filter(k => (WRITABLE as readonly string[]).includes(k) || k === 'images').sort(),
-    before: null,
-    after,
-    entityStatement,
-    children: imageStatements(images, now),
-    status: 201,
+    const now = isoNow()
+    const geohash = ngeohash.encode(s.lat, s.lng, 9)
+    const after: MasjidEntity = {
+      id: 0, // placeholder: the real id is filled in by the batch
+      version: 1,
+      name: s.name,
+      type_id: s.type_id,
+      lat: s.lat,
+      lng: s.lng,
+      geohash,
+      country_id: s.country_id,
+      state_id: s.state_id,
+      city_id: s.city_id ?? null,
+      address: s.address ?? null,
+      description: s.description ?? null,
+      jumaat_available: s.jumaat_available ?? false,
+      telephone: s.telephone ?? null,
+      email: s.email ?? null,
+      google_url: s.google_url ?? null,
+      contacts: applyContacts([], contactOps),
+      facilities: applyFacilities([], facilityOps),
+      images,
+      external_ids: externalId === null ? [] : [{ app_id: ctx.originApp, external_id: externalId }],
+      status: 'active',
+      merged_into: null,
+      updated_by_app: ctx.originApp,
+      created_at: now,
+      updated_at: now,
+    }
+
+    const entityStatement = ctx.db
+      .prepare(
+        `INSERT INTO masjids (version, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
+           address, description, telephone, email, google_url, jumaat_available, status, updated_by_app,
+           created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+      )
+      .bind(
+        after.name, after.type_id, after.lat, after.lng, geohash, after.city_id, after.state_id, after.country_id,
+        after.address, after.description, after.telephone, after.email, after.google_url,
+        after.jumaat_available ? 1 : 0, ctx.originApp, now, now,
+      )
+
+    const changedFields = Object.keys(body)
+      .filter(k => (WRITABLE as readonly string[]).includes(k) || k === 'images' || k === 'contacts' || k === 'facilities')
+    if (externalId !== null) changedFields.push('external_ids')
+
+    try {
+      return await commitWrite(c, ctx, {
+        entity: 'masjid',
+        op: 'create',
+        entityId: null,
+        baseVersion: null,
+        masjidId: null,
+        changedFields: changedFields.sort(),
+        before: null,
+        after,
+        entityStatement,
+        changeExtra: force ? { forced: true } : undefined,
+        children: (b) => [
+          ...imageStatements(images, now)(b),
+          ...contactStatements(b, contactOps.filter(o => o.value !== null)),
+          ...facilityStatements(b, facilityOps.filter(o => o.available !== null)),
+          ...(externalId === null ? [] : [
+            b.stmt(
+              'INSERT INTO masjid_external_ids (app_id, external_id, masjid_id, created_at) VALUES (?, ?, {{ID}}, ?)',
+              [ctx.originApp, externalId, now],
+            ),
+          ]),
+        ],
+        status: 201,
+      })
+    } catch (err) {
+      if (externalId !== null && isExternalIdCollision(err)) {
+        // A concurrent request linked the same id between our check and the batch (the batch rolled back).
+        const linked = await ctx.db
+          .prepare('SELECT masjid_id FROM masjid_external_ids WHERE app_id = ? AND external_id = ?')
+          .bind(ctx.originApp, externalId)
+          .first<{ masjid_id: number }>()
+        throw alreadyLinked(linked?.masjid_id ?? 0, ctx.originApp, externalId)
+      }
+      throw err
+    }
   })
 })
 
@@ -340,7 +504,11 @@ masjidsRouter.patch('/:id', async (c) => {
     if (('lat' in body) !== ('lng' in body)) fail('lat and lng must both be provided together', 'lat')
     const s = validateScalars(body)
     const images = 'images' in body ? validateImages(body.images) : undefined
-    if (Object.keys(s).length === 0 && images === undefined) fail('No patchable fields provided', 'body')
+    const contactOps = 'contacts' in body ? validateContacts(body.contacts) : undefined
+    const facilityOps = 'facilities' in body ? await validateFacilities(ctx.db, body.facilities) : undefined
+    if (Object.keys(s).length === 0 && images === undefined && contactOps === undefined && facilityOps === undefined) {
+      fail('No patchable fields provided', 'body')
+    }
     await checkReferences(ctx.db, s)
 
     if (before.version !== ctx.ifMatch) throw versionConflict(before)
@@ -348,6 +516,8 @@ masjidsRouter.patch('/:id', async (c) => {
     const now = isoNow()
     const after: MasjidEntity = { ...before, ...s, version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
     if (images !== undefined) after.images = images
+    if (contactOps !== undefined) after.contacts = applyContacts(before.contacts, contactOps)
+    if (facilityOps !== undefined) after.facilities = applyFacilities(before.facilities, facilityOps)
     if (s.lat !== undefined && s.lng !== undefined) after.geohash = ngeohash.encode(s.lat, s.lng, 9)
 
     const changedFields: string[] = []
@@ -355,6 +525,8 @@ masjidsRouter.patch('/:id', async (c) => {
       if (before[key] !== after[key]) changedFields.push(key)
     }
     if (images !== undefined && JSON.stringify(images) !== JSON.stringify(before.images)) changedFields.push('images')
+    if (JSON.stringify(after.contacts) !== JSON.stringify(before.contacts)) changedFields.push('contacts')
+    if (JSON.stringify(after.facilities) !== JSON.stringify(before.facilities)) changedFields.push('facilities')
     changedFields.sort()
 
     const sets: string[] = []
@@ -382,11 +554,130 @@ masjidsRouter.patch('/:id', async (c) => {
       after,
       entityStatement,
       loadCurrent: () => loadMasjid(ctx.db, id),
-      children: images === undefined ? undefined : (b) => [
-        b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}}'),
-        ...imageStatements(images, now)(b),
+      children: (b) => [
+        ...(images === undefined ? [] : [
+          b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}}'),
+          ...imageStatements(images, now)(b),
+        ]),
+        ...(contactOps === undefined ? [] : contactStatements(b, contactOps)),
+        ...(facilityOps === undefined ? [] : facilityStatements(b, facilityOps)),
       ],
       status: 200,
     })
   })
 })
+
+// Link: PUT /masjids/:id/external-ids/:app_id  { "external_id": "..." }  (spec 4.5). One-to-one per app.
+masjidsRouter.put('/:id/external-ids/:app_id', async (c) => {
+  const id = parseId(c.req.param('id'))
+  const appId = c.req.param('app_id')
+  if (appId !== c.get('key').app_id) {
+    throw new ApiError(403, 'forbidden', 'You can only link your own app_id', { app_id: appId })
+  }
+  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    const externalId = validateExternalId(body.external_id)
+
+    // No If-Match on a link: reload and retry if another write bumps the version between our read and commit.
+    for (let attempt = 0; ; attempt++) {
+      const before = await loadMasjid(ctx.db, id)
+      if (!before || before.status !== 'active') throw new ApiError(404, 'not_found', 'Masjid not found')
+
+      const mine = before.external_ids.filter(e => e.app_id === appId)
+      if (mine.some(e => e.external_id === externalId)) return c.json(before, 200) // already linked: no-op
+      if (mine.length > 0) throw alreadyLinked(id, appId, mine[0].external_id)
+
+      const owner = await ctx.db
+        .prepare('SELECT masjid_id FROM masjid_external_ids WHERE app_id = ? AND external_id = ?')
+        .bind(appId, externalId)
+        .first<{ masjid_id: number }>()
+      if (owner) throw alreadyLinked(owner.masjid_id, appId, externalId)
+
+      const now = isoNow()
+      const after: MasjidEntity = {
+        ...before,
+        external_ids: [...before.external_ids, { app_id: appId, external_id: externalId }]
+          .sort((a, b) => (a.app_id + '\0' + a.external_id < b.app_id + '\0' + b.external_id ? -1 : 1)),
+        version: before.version + 1,
+        updated_by_app: ctx.originApp,
+        updated_at: now,
+      }
+      try {
+        return await commitWrite(c, ctx, {
+          entity: 'masjid',
+          op: 'update',
+          entityId: id,
+          baseVersion: before.version,
+          masjidId: null,
+          changedFields: ['external_ids'],
+          before,
+          after,
+          entityStatement: ctx.db
+            .prepare('UPDATE masjids SET version = version + 1, updated_by_app = ?, updated_at = ? WHERE id = ? AND version = ?')
+            .bind(ctx.originApp, now, id, before.version),
+          loadCurrent: () => loadMasjid(ctx.db, id),
+          children: (b) => [
+            b.stmt(
+              'INSERT INTO masjid_external_ids (app_id, external_id, masjid_id, created_at) VALUES (?, ?, {{ID}}, ?)',
+              [appId, externalId, now],
+            ),
+          ],
+          status: 200,
+        })
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'version_conflict' && attempt < 3) continue
+        if (isExternalIdCollision(err)) {
+          const cur = await loadMasjid(ctx.db, id)
+          if (cur?.external_ids.some(e => e.app_id === appId && e.external_id === externalId)) return c.json(cur, 200)
+          const owner2 = await ctx.db
+            .prepare('SELECT masjid_id FROM masjid_external_ids WHERE app_id = ? AND external_id = ?')
+            .bind(appId, externalId)
+            .first<{ masjid_id: number }>()
+          throw alreadyLinked(owner2?.masjid_id ?? 0, appId, externalId)
+        }
+        throw err
+      }
+    }
+  })
+})
+
+// Soft delete. The tombstone keeps its external ids so apps can still match the delete.
+masjidsRouter.delete('/:id', async (c) => {
+  const id = parseId(c.req.param('id'))
+  const begin = await beginWrite(c, { requireIfMatch: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+
+  return replayOnConflict(ctx, async () => {
+    const before = await loadMasjid(ctx.db, id)
+    if (!before || before.status !== 'active') throw new ApiError(404, 'not_found', 'Masjid not found')
+    if (before.version !== ctx.ifMatch) throw versionConflict(before)
+
+    const now = isoNow()
+    const after: MasjidEntity = { ...before, status: 'deleted', version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
+    return commitWrite(c, ctx, {
+      entity: 'masjid',
+      op: 'delete',
+      entityId: id,
+      baseVersion: before.version,
+      masjidId: null,
+      changedFields: ['status'],
+      before,
+      after,
+      entityStatement: ctx.db
+        .prepare(
+          `UPDATE masjids SET status = 'deleted', deleted_at = ?, version = version + 1, updated_by_app = ?, updated_at = ?
+           WHERE id = ? AND version = ?`,
+        )
+        .bind(now, ctx.originApp, now, id, before.version),
+      loadCurrent: () => loadMasjid(ctx.db, id),
+      status: 200,
+    })
+  })
+})
+
+registerMasjidEventRoutes(masjidsRouter)

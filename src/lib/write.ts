@@ -66,6 +66,8 @@ export interface WriteSpec {
   loadCurrent?: () => Promise<unknown>
   children?: (b: ChildBuilder) => D1PreparedStatement[]
   status: 200 | 201
+  /** Extra top-level keys recorded in changes.after_json only (e.g. `forced: true`); never in the response. */
+  changeExtra?: Record<string, unknown>
   /** Override the change's origin_app (admin writes use "sentral_admin"). */
   originApp?: string
 }
@@ -109,9 +111,12 @@ function parseIfMatch(raw: string | undefined): number {
 
 export async function beginWrite(
   c: Context<AppEnv>,
-  opts: { requireIfMatch: boolean },
+  opts: { requireIfMatch: boolean; idempotencyOptional?: boolean },
 ): Promise<{ replay: Response } | { ctx: WriteCtx }> {
-  const idemKey = c.req.header('Idempotency-Key')?.trim() ?? ''
+  let idemKey = c.req.header('Idempotency-Key')?.trim() ?? ''
+  // PUT link: the contract does not require the header (R4 names POST/PATCH/DELETE). Without it the write gets a
+  // private key, so nothing replays; the handler itself is idempotent.
+  if (idemKey === '' && opts.idempotencyOptional) idemKey = `auto-${crypto.randomUUID()}`
   if (idemKey.length < 1 || idemKey.length > 255 || CONTROL_CHARS.test(idemKey)) {
     throw validationError(
       'Idempotency-Key header is required (1-255 characters, no control characters)',
@@ -200,6 +205,7 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
     const isCreate = spec.op === 'create'
     const origin = spec.originApp ?? ctx.originApp
     const afterJson = JSON.stringify(spec.after)
+    const changeAfterJson = spec.changeExtra ? JSON.stringify({ ...spec.after, ...spec.changeExtra }) : afterJson
     const beforeJson = spec.before === null ? null : JSON.stringify(spec.before)
     const fieldsJson = JSON.stringify(spec.changedFields)
 
@@ -221,7 +227,7 @@ export function buildCommitStatements(ctx: WriteCtx, specs: WriteSpec[], now: st
     stmts.push(
       db.prepare(
         `INSERT INTO changes (${changeCols}) VALUES (?, ${entityIdSql}, ${masjidIdSql}, ?, ?, ?, ?, ?, ?, ${afterExpr}, ?)`,
-      ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, afterJson, now),
+      ).bind(spec.entity, spec.op, version, origin, ctx.actor, fieldsJson, beforeJson, changeAfterJson, now),
     )
     if (index === 0) {
       // The stored response is the first entity (the primary one).

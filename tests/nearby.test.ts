@@ -7,18 +7,18 @@ import { readHeaders } from './helpers'
 describe('GET /masjids/nearby', () => {
   it('returns within-radius rows for valid lat/lng/radius (APIREAD-07)', async () => {
     // Kuala Lumpur coordinates
-    const response = await SELF.fetch('http://example.com/masjids/nearby?lat=3.1412&lng=101.6865&radius=5', { headers: readHeaders() })
+    const response = await SELF.fetch('http://example.com/masjids/nearby?lat=3.1412&lng=101.6865&radius=5000', { headers: readHeaders() })
     expect(response.status).toBe(200)
     const body = await response.json() as {
       data: unknown[]
-      meta: { total: number; page: number; per_page: number }
+      next_cursor: string | null
     }
     expect(Array.isArray(body.data)).toBe(true)
-    expect(typeof body.meta).toBe('object')
+    expect('next_cursor' in body).toBe(true)
   })
 
-  it('returns 422 with { error } when radius > 20 (APIREAD-07)', async () => {
-    const response = await SELF.fetch('http://example.com/masjids/nearby?lat=3.1&lng=101.7&radius=25', { headers: readHeaders() })
+  it('returns 422 with { error } when radius > 20000 m (APIREAD-07)', async () => {
+    const response = await SELF.fetch('http://example.com/masjids/nearby?lat=3.1&lng=101.7&radius=25000', { headers: readHeaders() })
     expect(response.status).toBe(422)
     const body = await response.json() as { error: string }
     expect(typeof body.error).toBe('string')

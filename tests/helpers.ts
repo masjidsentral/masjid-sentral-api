@@ -66,9 +66,14 @@ export interface MasjidJson {
 }
 
 /** Create a masjid through the API and return the entity. */
-export async function createMasjid(overrides: Record<string, unknown> = {}, token: string = KEYS.jm.token): Promise<MasjidJson> {
+export async function createMasjid(
+  overrides: Record<string, unknown> = {},
+  token: string = KEYS.jm.token,
+  opts: { force?: boolean } = {},
+): Promise<MasjidJson> {
   const { SELF } = await import('cloudflare:test')
-  const res = await SELF.fetch(`${BASE}/masjids`, {
+  // force=true by default: most tests re-create the same fixture and must not trip the duplicate gate (S3).
+  const res = await SELF.fetch(`${BASE}/masjids${opts.force === false ? '' : '?force=true'}`, {
     method: 'POST',
     headers: writeHeaders(token),
     body: JSON.stringify({ ...MASJID_BODY, ...overrides }),
