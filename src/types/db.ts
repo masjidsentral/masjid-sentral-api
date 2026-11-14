@@ -1,4 +1,4 @@
-// DB row shapes derived from masjidsentral-db-schema/migrations/001_initial.sql
+// DB row shapes (masjidsentral-db-schema migrations 001-004)
 
 export interface CountryRow {
   id: string
@@ -26,6 +26,7 @@ export interface MasjidTypeRow {
 
 export interface MasjidRow {
   id: number
+  version: number
   name: string
   type_id: string
   lat: number
@@ -36,60 +37,14 @@ export interface MasjidRow {
   country_id: string
   address: string | null
   description: string | null
-  status: 'active' | 'deleted'
+  status: 'active' | 'deleted' | 'merged'
   deleted_at: string | null
+  merged_into: number | null
   jumaat_available: 0 | 1
   telephone: string | null
   email: string | null
   google_url: string | null
-  source: string
-  created_at: string
-  updated_at: string
-}
-
-export interface MasjidImageRow {
-  id: number
-  masjid_id: number
-  path: string
-  is_thumbnail: 0 | 1
-  sort_order: number
-  created_at: string
-}
-
-export interface MasjidFacilityRow {
-  id: number
-  masjid_id: number
-  facility: string
-}
-
-export interface MasjidContactRow {
-  id: number
-  masjid_id: number
-  type: 'facebook' | 'instagram' | 'twitter' | 'youtube' | 'whatsapp'
-  value: string
-}
-
-export interface MasjidReviewRow {
-  id: number
-  masjid_id: number
-  rating: number
-  message: string | null
-  source_app: string
-  source_user_id: string | null
-  created_at: string
-}
-
-export interface MasjidEventRow {
-  id: number
-  masjid_id: number
-  title: string
-  description: string | null
-  start_at: string          // Column is start_at per 001_initial.sql (NOT start_time)
-  end_at: string | null
-  status: 'active' | 'cancelled' | 'completed'
-  rrule: string | null
-  source_app: string
-  source_user_id: string | null
+  updated_by_app: string | null
   created_at: string
   updated_at: string
 }

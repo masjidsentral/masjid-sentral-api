@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { SELF, env } from 'cloudflare:test'
-import app from '../src/index'
+import { app } from '../src/index'
 import { getActor } from '../src/middleware/auth'
 import { KEYS, bearer, readHeaders, writeHeaders } from './helpers'
 // @ts-expect-error plain .mjs script

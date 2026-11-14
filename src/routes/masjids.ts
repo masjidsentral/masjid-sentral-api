@@ -3,11 +3,13 @@
 
 import { Hono } from 'hono'
 import ngeohash from 'ngeohash'
-import type { MasjidRow, MasjidImageRow, MasjidFacilityRow, MasjidContactRow, MasjidReviewRow, MasjidEventRow } from '../types/db'
-import { buildImageUrl } from '../lib/images'
+import type { MasjidRow } from '../types/db'
 import { geohashPrefixes, haversineKm } from '../lib/geo'
 import type { AppEnv } from '../middleware/auth'
-import { errorBody } from '../lib/errors'
+import { ApiError, errorBody } from '../lib/errors'
+import { loadMasjid, normaliseImages, type MasjidEntity } from '../lib/entities'
+import { beginWrite, commitWrite, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec } from '../lib/write'
+import { isoNow } from '../lib/time'
 
 export const masjidsRouter = new Hono<AppEnv>()
 
@@ -15,8 +17,8 @@ export const masjidsRouter = new Hono<AppEnv>()
 
 masjidsRouter.get('/', async (c) => {
   // Build dynamic WHERE conditions — always seed with soft-delete filter (APIREAD-10)
-  const conditions: string[] = ['status != ?']
-  const params: (string | number)[] = ['deleted']
+  const conditions: string[] = ["status = 'active'"]
+  const params: (string | number)[] = []
 
   const state = c.req.query('state')
   if (state) { conditions.push('state_id = ?'); params.push(state.toLowerCase()) }
@@ -53,7 +55,7 @@ masjidsRouter.get('/', async (c) => {
       .bind(...params),
     c.env.DB.prepare(
       `SELECT id, name, type_id, state_id, city_id, country_id,
-        address, lat, lng, jumaat_available, status, source, created_at, updated_at
+        address, lat, lng, jumaat_available, status, version, created_at, updated_at
        FROM masjids WHERE ${where}
        ORDER BY id ASC LIMIT ? OFFSET ?`
     ).bind(...params, perPage, offset),
@@ -70,24 +72,22 @@ masjidsRouter.get('/', async (c) => {
     // Build placeholders for IN clause — parameterized, no string interpolation (T-02-01)
     const placeholders = ids.map(() => '?').join(', ')
     const imageResult = await c.env.DB.prepare(
-      `SELECT masjid_id, path FROM masjid_images
+      `SELECT masjid_id, url FROM masjid_images
        WHERE masjid_id IN (${placeholders}) AND is_thumbnail = 1
        ORDER BY masjid_id ASC, sort_order ASC`
-    ).bind(...ids).run<Pick<MasjidImageRow, 'masjid_id' | 'path'>>()
+    ).bind(...ids).run<{ masjid_id: number; url: string }>()
 
     // Take first thumbnail per masjid (lowest sort_order, due to ORDER BY)
     for (const img of imageResult.results) {
       if (!(img.masjid_id in thumbnailMap)) {
-        thumbnailMap[img.masjid_id] = img.path
+        thumbnailMap[img.masjid_id] = img.url
       }
     }
   }
 
   const data = masjids.map(m => ({
     ...m,
-    thumbnail_url: thumbnailMap[m.id]
-      ? buildImageUrl(c.env.IMAGES_DELIVERY_URL, thumbnailMap[m.id], 'thumbnail')
-      : null,
+    thumbnail_url: thumbnailMap[m.id] ?? null,
   }))
 
   return c.json({ data, meta: { total, page, per_page: perPage } })
@@ -128,8 +128,8 @@ masjidsRouter.get('/nearby', async (c) => {
 
   const candidates = await c.env.DB.prepare(
     `SELECT id, name, type_id, lat, lng, geohash, state_id, city_id,
-      country_id, address, jumaat_available, status, source, created_at, updated_at
-     FROM masjids WHERE status != 'deleted' AND (${likeConditions})
+      country_id, address, jumaat_available, status, version, created_at, updated_at
+     FROM masjids WHERE status = 'active' AND (${likeConditions})
      ORDER BY id ASC`
   ).bind(...likeParams).run<MasjidRow>()
 
@@ -148,235 +148,243 @@ masjidsRouter.get('/nearby', async (c) => {
 // Must be registered AFTER /nearby (Pitfall 3)
 
 masjidsRouter.get('/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
-  // Non-numeric id guard — T-02-04
-  if (isNaN(id)) {
-    return c.json(errorBody('Invalid id', 'validation_failed'), 422)
+  const id = parseId(c.req.param('id'))
+
+  const masjid = await loadMasjid(c.env.DB, id)
+  if (!masjid) throw new ApiError(404, 'not_found', 'Masjid not found')
+
+  // A merged id points at the survivor; a deleted one returns its tombstone (contract 5.1, spec 4.8).
+  if (masjid.status === 'merged' && masjid.merged_into !== null) {
+    return c.redirect(`/masjids/${masjid.merged_into}`, 301)
   }
+  return c.json(masjid)
+})
 
-  // Batch all 7 queries in one D1 round-trip (Pattern 3)
-  const [
-    masjidResult,
-    imagesResult,
-    facilitiesResult,
-    contactsResult,
-    reviewsResult,
-    eventsResult,
-    ratingResult,
-  ] = await c.env.DB.batch([
-    // (1) Main masjid row — excludes deleted and internal soft-delete column (APIREAD-10, T-02-05, WR-02)
-    c.env.DB.prepare(
-      `SELECT id, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
-        address, description, status, jumaat_available, telephone, email, google_url,
-        source, created_at, updated_at
-       FROM masjids WHERE id = ? AND status != ?`
-    ).bind(id, 'deleted'),
-    // (2) Images ordered by sort_order (D-04)
-    c.env.DB.prepare(
-      'SELECT id, masjid_id, path, is_thumbnail, sort_order, created_at FROM masjid_images WHERE masjid_id = ? ORDER BY sort_order ASC'
-    ).bind(id),
-    // (3) Facilities
-    c.env.DB.prepare(
-      'SELECT id, masjid_id, facility FROM masjid_facilities WHERE masjid_id = ?'
-    ).bind(id),
-    // (4) Contacts — omit internal row id from public response
-    c.env.DB.prepare(
-      'SELECT masjid_id, type, value FROM masjid_contacts WHERE masjid_id = ?'
-    ).bind(id),
-    // (5) 10 most recent reviews — omit source_user_id (internal attribution, CR-04, WR-02)
-    c.env.DB.prepare(
-      'SELECT id, masjid_id, rating, message, source_app, created_at FROM masjid_reviews WHERE masjid_id = ? ORDER BY created_at DESC LIMIT 10'
-    ).bind(id),
-    // (6) Upcoming events — omit source_user_id (internal attribution, WR-02); column is start_at NOT start_time (Pitfall 1, D-06)
-    c.env.DB.prepare(
-      `SELECT id, masjid_id, title, description, start_at, end_at, status, rrule, source_app, created_at, updated_at
-       FROM masjid_events WHERE masjid_id = ? AND start_at >= datetime('now') ORDER BY start_at ASC`
-    ).bind(id),
-    // (7) Aggregate rating (D-07)
-    c.env.DB.prepare(
-      'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM masjid_reviews WHERE masjid_id = ?'
-    ).bind(id),
-  ])
+// ─── writes (through the S2 write pipeline) ───────────────────────────────────
 
-  const masjid = masjidResult.results[0] as MasjidRow | undefined
-  // 404 for non-existent or deleted masjid (APIREAD-10)
-  if (!masjid) {
-    return c.json(errorBody('Masjid not found', 'not_found'), 404)
+function parseId(raw: string): number {
+  if (!/^\d{1,15}$/.test(raw)) throw new ApiError(422, 'validation_failed', 'Invalid id', { field: 'id' })
+  return Number(raw)
+}
+
+function fail(message: string, field: string): never {
+  throw new ApiError(422, 'validation_failed', message, { field })
+}
+
+const NULLABLE_TEXT = ['address', 'description', 'telephone', 'email', 'google_url'] as const
+const REF_FIELDS = ['type_id', 'state_id', 'country_id'] as const
+const WRITABLE = [
+  'name', ...REF_FIELDS, 'city_id', 'lat', 'lng', ...NULLABLE_TEXT, 'jumaat_available',
+] as const
+
+type Scalars = Partial<Pick<MasjidEntity,
+  'name' | 'type_id' | 'state_id' | 'country_id' | 'city_id' | 'lat' | 'lng' | 'address' | 'description' |
+  'telephone' | 'email' | 'google_url' | 'jumaat_available'>>
+
+/** Validates and normalises the scalar fields present in `body`. Unknown fields are ignored (contract R10). */
+function validateScalars(body: Record<string, unknown>): Scalars {
+  const out: Record<string, unknown> = {}
+  for (const key of WRITABLE) {
+    if (!(key in body)) continue
+    const v = body[key]
+    if (key === 'name') {
+      if (typeof v !== 'string' || v.trim() === '' || v.length > 200) fail('name must be a non-empty string of at most 200 characters', key)
+      out.name = v.trim()
+    } else if ((REF_FIELDS as readonly string[]).includes(key)) {
+      if (typeof v !== 'string' || v === '') fail(`${key} must be a non-empty string`, key)
+      out[key] = v
+    } else if (key === 'city_id') {
+      if (v !== null && (typeof v !== 'string' || v === '')) fail('city_id must be a string or null', key)
+      out[key] = v
+    } else if (key === 'lat' || key === 'lng') {
+      const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN
+      const max = key === 'lat' ? 90 : 180
+      if (!Number.isFinite(n) || n < -max || n > max) fail(`${key} must be a number between ${-max} and ${max}`, key)
+      out[key] = n
+    } else if (key === 'jumaat_available') {
+      if (v === true || v === 1) out[key] = true
+      else if (v === false || v === 0) out[key] = false
+      else fail('jumaat_available must be a boolean', key)
+    } else {
+      if (v !== null && typeof v !== 'string') fail(`${key} must be a string or null`, key)
+      if (typeof v === 'string' && v.length > 2000) fail(`${key} is too long`, key)
+      out[key] = v
+    }
   }
+  return out as Scalars
+}
 
-  const images = (imagesResult.results as MasjidImageRow[]).map(img => ({
-    ...img,
-    thumbnail_url: buildImageUrl(c.env.IMAGES_DELIVERY_URL, img.path, 'thumbnail'),
-    full_url: buildImageUrl(c.env.IMAGES_DELIVERY_URL, img.path, 'public'),
-  }))
+function validateImages(raw: unknown): MasjidEntity['images'] {
+  if (!Array.isArray(raw) || raw.length > 30) fail('images must be an array of at most 30 items', 'images')
+  const items = (raw as unknown[]).map((img, i) => {
+    const o = img as { url?: unknown; is_thumbnail?: unknown; sort_order?: unknown }
+    if (typeof img !== 'object' || img === null) fail(`images[${i}] must be an object`, 'images')
+    if (typeof o.url !== 'string' || !/^https:\/\/\S+$/.test(o.url) || o.url.length > 2000) {
+      fail(`images[${i}].url must be an https URL`, 'images')
+    }
+    if (o.is_thumbnail !== undefined && typeof o.is_thumbnail !== 'boolean') fail(`images[${i}].is_thumbnail must be a boolean`, 'images')
+    if (o.sort_order !== undefined && !Number.isInteger(o.sort_order)) fail(`images[${i}].sort_order must be an integer`, 'images')
+    return { url: o.url, is_thumbnail: o.is_thumbnail as boolean | undefined, sort_order: o.sort_order as number | undefined }
+  })
+  return normaliseImages(items)
+}
 
-  const facilities = facilitiesResult.results as MasjidFacilityRow[]
-  const contacts = contactsResult.results as MasjidContactRow[]
-  const reviews = reviewsResult.results as MasjidReviewRow[]
-  const events = eventsResult.results as MasjidEventRow[]
+/** type_id / state_id / country_id / city_id must exist (422). */
+async function checkReferences(db: D1Database, s: Scalars): Promise<void> {
+  const checks: Array<[string, string, string]> = []
+  if (s.type_id !== undefined) checks.push(['type_id', 'masjid_types', s.type_id])
+  if (s.state_id !== undefined) checks.push(['state_id', 'states', s.state_id])
+  if (s.country_id !== undefined) checks.push(['country_id', 'countries', s.country_id])
+  if (typeof s.city_id === 'string') checks.push(['city_id', 'cities', s.city_id])
+  if (checks.length === 0) return
+  const results = await db.batch(checks.map(([, table, id]) => db.prepare(`SELECT 1 AS ok FROM ${table} WHERE id = ?`).bind(id)))
+  results.forEach((r, i) => {
+    if (r.results.length === 0) fail(`Unknown ${checks[i][0]}: ${checks[i][2]}`, checks[i][0])
+  })
+}
 
-  // avg_rating: null when no reviews, rounded to 1dp otherwise (D-07)
-  const ratingRow = ratingResult.results[0] as { avg_rating: number | null; review_count: number }
-  const avg_rating = ratingRow.avg_rating !== null
-    ? Math.round(ratingRow.avg_rating * 10) / 10
-    : null
-  const review_count = ratingRow.review_count
+function imageStatements(images: MasjidEntity['images'], now: string) {
+  return (b: Parameters<NonNullable<WriteSpec['children']>>[0]) =>
+    images.map(img =>
+      b.stmt(
+        'INSERT INTO masjid_images (masjid_id, url, is_thumbnail, sort_order, created_at) SELECT {{ID}}, ?, ?, ?, ? WHERE {{G}}',
+        [img.url, img.is_thumbnail ? 1 : 0, img.sort_order, now],
+      ),
+    )
+}
 
-  return c.json({
-    ...masjid,
+const REQUIRED_ON_CREATE = ['name', 'type_id', 'state_id', 'country_id', 'lat', 'lng', 'address'] as const
+
+masjidsRouter.post('/', async (c) => {
+  const begin = await beginWrite(c, { requireIfMatch: false })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+
+  const body = parseJsonObject(ctx)
+  for (const field of REQUIRED_ON_CREATE) {
+    if (body[field] === undefined || body[field] === null || body[field] === '') fail(`Missing required field: ${field}`, field)
+  }
+  const s = validateScalars(body) as Required<Pick<Scalars, 'name' | 'type_id' | 'state_id' | 'country_id' | 'lat' | 'lng'>> & Scalars
+  const images = 'images' in body ? validateImages(body.images) : []
+  await checkReferences(ctx.db, s)
+
+  const now = isoNow()
+  const geohash = ngeohash.encode(s.lat, s.lng, 9)
+  const after: MasjidEntity = {
+    id: 0, // placeholder: the real id is filled in by the batch
+    version: 1,
+    name: s.name,
+    type_id: s.type_id,
+    lat: s.lat,
+    lng: s.lng,
+    geohash,
+    country_id: s.country_id,
+    state_id: s.state_id,
+    city_id: s.city_id ?? null,
+    address: s.address ?? null,
+    description: s.description ?? null,
+    jumaat_available: s.jumaat_available ?? false,
+    telephone: s.telephone ?? null,
+    email: s.email ?? null,
+    google_url: s.google_url ?? null,
+    contacts: [],
+    facilities: [],
     images,
-    facilities,
-    contacts,
-    reviews,
-    events,
-    avg_rating,
-    review_count,
+    external_ids: [],
+    status: 'active',
+    merged_into: null,
+    updated_by_app: ctx.originApp,
+    created_at: now,
+    updated_at: now,
+  }
+
+  const entityStatement = ctx.db
+    .prepare(
+      `INSERT INTO masjids (version, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
+         address, description, telephone, email, google_url, jumaat_available, status, updated_by_app,
+         created_at, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+    )
+    .bind(
+      after.name, after.type_id, after.lat, after.lng, geohash, after.city_id, after.state_id, after.country_id,
+      after.address, after.description, after.telephone, after.email, after.google_url,
+      after.jumaat_available ? 1 : 0, ctx.originApp, now, now,
+    )
+
+  return commitWrite(c, ctx, {
+    entity: 'masjid',
+    op: 'create',
+    entityId: null,
+    baseVersion: null,
+    masjidId: null,
+    changedFields: Object.keys(body).filter(k => (WRITABLE as readonly string[]).includes(k) || k === 'images').sort(),
+    before: null,
+    after,
+    entityStatement,
+    children: imageStatements(images, now),
+    status: 201,
   })
 })
 
-// ─── POST /masjids ── create new masjid ─────────────────────────────────────
-
-const REQUIRED_FIELDS = ['name', 'type_id', 'state_id', 'country_id', 'lat', 'lng', 'address', 'source'] as const
-
-masjidsRouter.post('/', async (c) => {
-  let body: Record<string, unknown>
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json(errorBody('Invalid JSON body', 'validation_failed'), 422)
-  }
-
-  // D-07: validate required fields
-  for (const field of REQUIRED_FIELDS) {
-    if (body[field] === undefined || body[field] === null || body[field] === '') {
-      return c.json(errorBody(`Missing required field: ${field}`, 'validation_failed'), 422)
-    }
-  }
-
-  const name = body.name as string
-  const type_id = body.type_id as string
-  const state_id = body.state_id as string
-  const country_id = body.country_id as string
-  const lat = Number(body.lat)
-  const lng = Number(body.lng)
-  const address = body.address as string
-  const source = body.source as string
-
-  // D-10: handler computes geohash — caller value ignored
-  const geohash = ngeohash.encode(lat, lng, 9)
-
-  // D-08: city_id optional; D-09: nullable fields default to null
-  const city_id = body.city_id ?? null
-  const description = body.description ?? null
-  const telephone = body.telephone ?? null
-  const email = body.email ?? null
-  const google_url = body.google_url ?? null
-  // coerce boolean jumaat_available to integer (true → 1, false → 0, numeric passthrough)
-  const jumaat_available =
-    body.jumaat_available === true ? 1
-    : body.jumaat_available === false ? 0
-    : (body.jumaat_available ?? 0)
-
-  // D-11: created_at and updated_at set server-side via datetime('now')
-  const insertResult = await c.env.DB
-    .prepare(
-      `INSERT INTO masjids (name, type_id, lat, lng, geohash, city_id, state_id, country_id,
-         address, description, telephone, email, google_url, jumaat_available, source,
-         created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-    )
-    .bind(
-      name, type_id, lat, lng, geohash,
-      city_id, state_id, country_id,
-      address, description, telephone, email, google_url, jumaat_available, source
-    )
-    .run()
-
-  const newId = insertResult.meta.last_row_id
-
-  // D-12: return full core masjid row (excludes deleted_at — internal column)
-  const created = await c.env.DB
-    .prepare(
-      `SELECT id, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
-         address, description, status, jumaat_available, telephone, email, google_url,
-         source, created_at, updated_at
-       FROM masjids WHERE id = ?`
-    )
-    .bind(newId)
-    .first<MasjidRow>()
-
-  return c.json(created, 201)
-})
-
-// ─── PATCH /masjids/:id ── partial update ───────────────────────────────────
-
-const PATCHABLE_FIELDS = [
-  'name', 'type_id', 'state_id', 'country_id', 'city_id', 'lat', 'lng',
-  'address', 'description', 'telephone', 'email', 'google_url', 'jumaat_available', 'source',
-] as const
-
 masjidsRouter.patch('/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
-  if (isNaN(id)) {
-    return c.json(errorBody('Invalid id', 'validation_failed'), 422)
+  const id = parseId(c.req.param('id'))
+  const begin = await beginWrite(c, { requireIfMatch: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+
+  const body = parseJsonObject(ctx)
+  const before = await loadMasjid(ctx.db, id)
+  if (!before || before.status !== 'active') throw new ApiError(404, 'not_found', 'Masjid not found')
+
+  if (('lat' in body) !== ('lng' in body)) fail('lat and lng must both be provided together', 'lat')
+  const s = validateScalars(body)
+  const images = 'images' in body ? validateImages(body.images) : undefined
+  if (Object.keys(s).length === 0 && images === undefined) fail('No patchable fields provided', 'body')
+  await checkReferences(ctx.db, s)
+
+  if (before.version !== ctx.ifMatch) throw versionConflict(before)
+
+  const now = isoNow()
+  const after: MasjidEntity = { ...before, ...s, version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
+  if (images !== undefined) after.images = images
+  if (s.lat !== undefined && s.lng !== undefined) after.geohash = ngeohash.encode(s.lat, s.lng, 9)
+
+  const changedFields: string[] = []
+  for (const key of Object.keys(s) as Array<keyof Scalars>) {
+    if (before[key] !== after[key]) changedFields.push(key)
   }
+  if (images !== undefined && JSON.stringify(images) !== JSON.stringify(before.images)) changedFields.push('images')
+  changedFields.sort()
 
-  // D-16: pre-PATCH existence check — exclude deleted records (Pitfall 6)
-  const existing = await c.env.DB
-    .prepare(`SELECT id FROM masjids WHERE id = ? AND status != 'deleted'`)
-    .bind(id)
-    .first()
-  if (!existing) {
-    return c.json(errorBody('Masjid not found', 'not_found'), 404)
+  const sets: string[] = []
+  const binds: unknown[] = []
+  for (const key of Object.keys(s) as Array<keyof Scalars>) {
+    sets.push(`${key} = ?`)
+    binds.push(key === 'jumaat_available' ? (after.jumaat_available ? 1 : 0) : after[key])
   }
+  if (s.lat !== undefined) { sets.push('geohash = ?'); binds.push(after.geohash) }
+  sets.push('version = version + 1', 'updated_by_app = ?', 'updated_at = ?')
+  binds.push(ctx.originApp, now)
 
-  let body: Record<string, unknown>
-  try {
-    body = await c.req.json()
-  } catch {
-    return c.json(errorBody('Invalid JSON body', 'validation_failed'), 422)
-  }
+  const entityStatement = ctx.db
+    .prepare(`UPDATE masjids SET ${sets.join(', ')} WHERE id = ? AND version = ?`)
+    .bind(...binds, id, before.version)
 
-  // D-14: lat and lng must both be present or neither (Pitfall 4)
-  const hasLat = 'lat' in body
-  const hasLng = 'lng' in body
-  if (hasLat !== hasLng) {
-    return c.json(errorBody('lat and lng must both be provided together', 'validation_failed'), 422)
-  }
-
-  // Filter body to allowed fields only — strips internal fields (T-3-08)
-  const updates: Record<string, unknown> = {}
-  for (const key of PATCHABLE_FIELDS) {
-    if (key in body) updates[key] = body[key]
-  }
-
-  if (Object.keys(updates).length === 0) {
-    return c.json(errorBody('No patchable fields provided', 'validation_failed'), 422)
-  }
-
-  // D-14: recompute geohash when coordinates change
-  if (hasLat && hasLng) {
-    updates.geohash = ngeohash.encode(Number(updates.lat), Number(updates.lng), 9)
-  }
-
-  // D-15: always set updated_at = datetime('now') — no SQLite trigger exists
-  const setClauses = [...Object.keys(updates).map(k => `${k} = ?`), "updated_at = datetime('now')"]
-
-  await c.env.DB
-    .prepare(`UPDATE masjids SET ${setClauses.join(', ')} WHERE id = ?`)
-    .bind(...Object.values(updates), id)
-    .run()
-
-  // D-17: re-SELECT for correct updated_at and geohash values
-  const updated = await c.env.DB
-    .prepare(
-      `SELECT id, name, type_id, lat, lng, geohash, city_id, state_id, country_id,
-         address, description, status, jumaat_available, telephone, email, google_url,
-         source, created_at, updated_at
-       FROM masjids WHERE id = ?`
-    )
-    .bind(id)
-    .first<MasjidRow>()
-
-  return c.json(updated, 200)
+  return commitWrite(c, ctx, {
+    entity: 'masjid',
+    op: 'update',
+    entityId: id,
+    baseVersion: before.version,
+    masjidId: null,
+    changedFields,
+    before,
+    after,
+    entityStatement,
+    loadCurrent: () => loadMasjid(ctx.db, id),
+    children: images === undefined ? undefined : (b) => [
+      b.stmt('DELETE FROM masjid_images WHERE masjid_id = {{ID}} AND {{G}}'),
+      ...imageStatements(images, now)(b),
+    ],
+    status: 200,
+  })
 })

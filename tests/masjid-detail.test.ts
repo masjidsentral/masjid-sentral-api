@@ -16,21 +16,16 @@ describe('GET /masjids/:id', () => {
         images: unknown[]
         facilities: unknown[]
         contacts: unknown[]
-        reviews: unknown[]
-        events: unknown[]
-        avg_rating: number | null
-        review_count: number
+        version: number
+        external_ids: unknown[]
       }
       expect(typeof body.id).toBe('number')
       expect(typeof body.name).toBe('string')
       expect(Array.isArray(body.images)).toBe(true)
       expect(Array.isArray(body.facilities)).toBe(true)
       expect(Array.isArray(body.contacts)).toBe(true)
-      expect(Array.isArray(body.reviews)).toBe(true)
-      expect(Array.isArray(body.events)).toBe(true)
-      expect(typeof body.review_count).toBe('number')
-      // avg_rating is null when no reviews, number when reviews exist
-      expect(body.avg_rating === null || typeof body.avg_rating === 'number').toBe(true)
+      expect(Array.isArray(body.external_ids)).toBe(true)
+      expect(typeof body.version).toBe('number')
     }
   })
 

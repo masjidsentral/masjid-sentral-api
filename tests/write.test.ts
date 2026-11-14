@@ -13,7 +13,6 @@ const VALID_POST_BODY = {
   lat: 3.147,
   lng: 101.698,
   address: '1 Jalan Test',
-  source: 'manual',
 }
 
 describe('POST /masjids', () => {
@@ -43,21 +42,23 @@ describe('PATCH /masjids/:id', () => {
       body: JSON.stringify(VALID_POST_BODY),
     })
     expect(postResponse.status).toBe(201)
-    const created = await postResponse.json() as { id: number }
+    const created = await postResponse.json() as { id: number; version: number }
     const createdId = created.id
 
     // Then PATCH it
     const patchResponse = await SELF.fetch(`http://example.com/masjids/${createdId}`, {
       method: 'PATCH',
-      headers: writeHeaders(),
+      headers: writeHeaders(undefined, undefined, { 'If-Match': String(created.version) }),
       body: JSON.stringify({ name: 'Test Masjid Integration Updated' }),
     })
     expect(patchResponse.status).toBe(200)
     const updated = await patchResponse.json() as {
       id: number
       name: string
+      version: number
       updated_at: string
     }
+    expect(updated.version).toBe(created.version + 1)
     expect(updated.id).toBe(createdId)
     expect(updated.name).toBe('Test Masjid Integration Updated')
     // APIWRITE-05: updated_at is a string (timestamp set by server)

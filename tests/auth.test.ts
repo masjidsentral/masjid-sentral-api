@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import app from '../src/index'
+import { app } from '../src/index'
 import { SELF, env } from 'cloudflare:test'
 import { Hono } from 'hono'
 import { KEYS, tok, DEV_KEY_TOKEN, bearer, readHeaders, writeHeaders, sha256Hex } from './helpers'

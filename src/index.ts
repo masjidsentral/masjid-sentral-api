@@ -4,6 +4,9 @@ import openApiSpec from '../openapi.json' with { type: 'json' }
 import { masjidsRouter } from './routes/masjids'
 import { statesRouter } from './routes/states'
 import { citiesRouter } from './routes/cities'
+import { changesRouter } from './routes/changes'
+import { adminRouter } from './routes/admin'
+import { dispatchDue, purgeIdempotency } from './lib/webhooks'
 import { authMiddleware, requireScope, writeGuard, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { ApiError, errorBody } from './lib/errors'
@@ -30,6 +33,8 @@ app.get('/', (c) => {
 app.route('/masjids', masjidsRouter)
 app.route('/states', statesRouter)
 app.route('/cities', citiesRouter)
+app.route('/changes', changesRouter)
+app.route('/admin', adminRouter)
 
 // Error shape: { error, code, details? } (contract §1). No stack traces in responses.
 app.onError((err, c) => {
@@ -54,4 +59,15 @@ app.notFound((c) => {
   return c.json(errorBody('Not found', 'not_found'), 404)
 })
 
-export default app
+export { app }
+
+// Default export carries both handlers: HTTP and the per-minute cron (webhook dispatch, idempotency sweep).
+export default {
+  fetch: app.fetch,
+  async scheduled(_controller: ScheduledController, env: CloudflareBindings, ctx: ExecutionContext) {
+    ctx.waitUntil(Promise.all([
+      dispatchDue(env.DB),
+      purgeIdempotency(env.DB),
+    ]).then(() => undefined))
+  },
+} satisfies ExportedHandler<CloudflareBindings>

@@ -29,6 +29,16 @@ export function bearer(token: string): Record<string, string> {
 export const readHeaders = () => bearer(KEYS.read.token)
 
 /** Headers for a write request from the JM key, with an actor. */
-export function writeHeaders(token: string = KEYS.jm.token, actor = 'user-1'): Record<string, string> {
-  return { ...bearer(token), 'Content-Type': 'application/json', 'X-Sentral-Actor': actor }
+export function writeHeaders(
+  token: string = KEYS.jm.token,
+  actor = 'user-1',
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    ...bearer(token),
+    'Content-Type': 'application/json',
+    'X-Sentral-Actor': actor,
+    'Idempotency-Key': crypto.randomUUID(),
+    ...extra,
+  }
 }
