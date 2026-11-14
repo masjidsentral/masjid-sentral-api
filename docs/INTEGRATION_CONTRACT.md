@@ -56,6 +56,7 @@ app-specific data. Sentral never sees them.
 - `version`: an integer on every masjid and programme. It starts at 1 and goes up by 1 on every accepted write.
 - Errors: `{ "error": "<human message>", "code": "<machine_code>", "details"?: {...} }`. Codes: `unauthorized` 401, `forbidden` 403, `not_found` 404, `version_conflict` 409, `idempotency_mismatch` 409, `validation_failed` 422, `rate_limited` 429, `internal` 500, plus `possible_duplicate` 409 (`details.candidates`, same shape as `/masjids/match`) and `already_linked` 409 (`details.masjid_id` or `details.event_id`, `app_id`, `external_id`). Admin-only: `already_exists` 409. Repeating the same contact `type` or facility `code` in one request → 422.
 - Rate limit: 600 requests/min per key. On `429`, honour `Retry-After` (seconds).
+- Query strings: URL-encode `+` in offsets as `%2B` (an unencoded `+` arrives as a space and is read as `+`).
 - Lists: list endpoints take `limit` (max 100; default 20, programmes 50) and `cursor`, and return `{ "data": [ <full entity> … ], "next_cursor": <string|null> }` (null at the end). Treat the cursor as opaque.
 - A PATCH that changes nothing still counts as a write: the version goes up by 1 and a change is emitted.
 
@@ -162,11 +163,11 @@ All require `read`. Writes also require `write`.
 | GET | `/masjids/nearby?lat&lng&radius` | `radius` in metres, max 20,000. Rows add `distance_m`, nearest first. |
 | GET | `/masjids/{id}` | Full record (§4.1). A merged id returns `301` with `Location` set to the survivor. A deleted id returns `200` with the tombstone (`status: deleted`). Lists, search and nearby return `active` only. |
 | GET | `/masjids/by-external/{app_id}/{external_id}` | **NEW.** Find a masjid by your own id, whatever its status. |
-| GET | `/masjids/match?lat&lng&name[&type_id]` | **NEW.** Returns `{ "candidates": [ { id, name, type_id, same_type, lat, lng, address, external_ids, score, distance_m } ] }`: the top 5 active masjids within 1 km by `score` 0–1 (§9 step 2). `same_type` compares with your `type_id` (false if you sent none). Names differing only by a number or a single letter (Blok A / Blok B, Fasa 1 / Fasa 2) score below 0.9. |
+| GET | `/masjids/match?lat&lng&name[&type_id]` | **NEW.** Returns `{ "candidates": [ { id, name, type_id, same_type, lat, lng, address, external_ids, score, distance_m } ] }`: the top 5 active masjids within 1 km by `score` 0–1 (§9 step 2). `same_type` compares with your `type_id` (`null` if you sent none). Names differing only by a number or a single letter (Blok A / Blok B, Fasa 1 / Fasa 2) score below 0.9. |
 | POST | `/masjids` | Create. Body = §4.1 writable fields + `external_id`. Returns `201` + full record. Possible duplicate (a same-type candidate with `score ≥ 0.9` within 50 m) → `409 code: possible_duplicate` with `details.candidates`; resend with `?force=true` only after a person confirms it is a different place (the change records `"forced": true`). An `external_id` already held by an active masjid → `409 already_linked`; one held by a deleted masjid moves to the new masjid. |
-| PATCH | `/masjids/{id}` | Send only the fields you changed. `contacts`/`facilities` in a PATCH change only the listed `type`/`code` entries. Send `{ "code": "X", "available": null }` to clear one, or `{ "type": "facebook", "value": null }` for a contact. Retired facility codes can be cleared but not set. `images`, when sent, replace the whole list. Use DELETE, not `status`, to delete. |
+| PATCH | `/masjids/{id}` | Send only the fields you changed. `contacts`/`facilities` in a PATCH change only the listed `type`/`code` entries. Send `{ "code": "X", "available": null }` to clear one, or `{ "type": "facebook", "value": null }` for a contact. Retired facility codes can be cleared but not set. `images`, when sent, replace the whole list. Use DELETE, not `status`, to delete. PATCH/DELETE on a merged masjid → `404` with `details.merged_into`. |
 | PUT | `/masjids/{id}/external-ids/{app_id}` | **NEW.** Body `{ "external_id": "q_5521" }`. Links your id; returns `200` + the full masjid with a bumped version and emits an `update` with `changed_fields: ["external_ids"]`. `Idempotency-Key` optional, no `If-Match`. Only your own `app_id` (else `403`). Same id again → `200`, no change. The masjid already has a different id from your app → `409 already_linked`. Your id held by another active masjid → `409 already_linked`; held by a deleted masjid → the link moves. A merged masjid → `404` with `details.merged_into`. |
-| DELETE | `/masjids/{id}` | **NEW.** Soft delete. Use it for "this place does not exist / closed for good". Its programmes are deleted in the same write (each emits an `event` `delete`). A masjid with more than 200 live programmes → 422 `details.reason: too_many_events`. |
+| DELETE | `/masjids/{id}` | **NEW.** Soft delete. Use it for "this place does not exist / closed for good". Its programmes are deleted in the same write (each emits an `event` `delete`). A masjid with more than 200 live programmes → 422 `details.reason: too_many_events`. If a programme is added while the delete runs → `409 version_conflict`; retry. |
 
 ### 5.2 Programmes — **NEW**
 
@@ -178,7 +179,7 @@ All require `read`. Writes also require `write`.
 | GET | `/events/by-external/{app_id}/{external_id}` | Whatever its status |
 | PUT | `/events/{id}/external-ids/{app_id}` | Link your programme id. Same rules as the masjid PUT. |
 | POST | `/masjids/{id}/events` | Create. Include `external_id`. Returns `201`. The masjid must be active: deleted → `404`, merged → `404` with `details.merged_into` (post to the survivor). |
-| PATCH | `/events/{id}` | Changed fields only |
+| PATCH | `/events/{id}` | Changed fields only. PATCH, DELETE and link of a programme whose masjid is not active → `404` (`details.merged_into` when merged). |
 | DELETE | `/events/{id}` | Sets `status: deleted` |
 
 ### 5.3 Reference
