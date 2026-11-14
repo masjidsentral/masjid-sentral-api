@@ -6,9 +6,10 @@ import ngeohash from 'ngeohash'
 import type { MasjidRow, MasjidImageRow, MasjidFacilityRow, MasjidContactRow, MasjidReviewRow, MasjidEventRow } from '../types/db'
 import { buildImageUrl } from '../lib/images'
 import { geohashPrefixes, haversineKm } from '../lib/geo'
-import { authMiddleware } from '../middleware/auth'
+import type { AppEnv } from '../middleware/auth'
+import { errorBody } from '../lib/errors'
 
-export const masjidsRouter = new Hono<{ Bindings: CloudflareBindings }>()
+export const masjidsRouter = new Hono<AppEnv>()
 
 // ─── GET /masjids ── paginated filterable list ─────────────────────────────
 
@@ -104,20 +105,20 @@ masjidsRouter.get('/nearby', async (c) => {
 
   // Validate presence — isNaN when param missing or non-numeric (T-02-04)
   if (isNaN(lat) || isNaN(lng)) {
-    return c.json({ error: 'Missing required param: lat, lng' }, 400)
+    return c.json(errorBody('Missing required param: lat, lng', 'validation_failed'), 422)
   }
 
   // Validate ranges
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    return c.json({ error: 'Invalid lat/lng range' }, 400)
+    return c.json(errorBody('Invalid lat/lng range', 'validation_failed'), 422)
   }
 
   // Validate radius — must be a positive number, capped at 20km (CR-01, WR-05, D-10)
   if (isNaN(radius) || radius <= 0) {
-    return c.json({ error: 'Invalid radius: must be greater than 0' }, 400)
+    return c.json(errorBody('Invalid radius: must be greater than 0', 'validation_failed'), 422)
   }
   if (radius > 20) {
-    return c.json({ error: 'Radius exceeds maximum of 20km' }, 400)
+    return c.json(errorBody('Radius exceeds maximum of 20km', 'validation_failed'), 422)
   }
 
   // Geohash prefix search — 9 cells (center + 8 neighbors) at tiered precision (D-09)
@@ -150,7 +151,7 @@ masjidsRouter.get('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
   // Non-numeric id guard — T-02-04
   if (isNaN(id)) {
-    return c.json({ error: 'Invalid id' }, 400)
+    return c.json(errorBody('Invalid id', 'validation_failed'), 422)
   }
 
   // Batch all 7 queries in one D1 round-trip (Pattern 3)
@@ -200,7 +201,7 @@ masjidsRouter.get('/:id', async (c) => {
   const masjid = masjidResult.results[0] as MasjidRow | undefined
   // 404 for non-existent or deleted masjid (APIREAD-10)
   if (!masjid) {
-    return c.json({ error: 'Masjid not found' }, 404)
+    return c.json(errorBody('Masjid not found', 'not_found'), 404)
   }
 
   const images = (imagesResult.results as MasjidImageRow[]).map(img => ({
@@ -237,18 +238,18 @@ masjidsRouter.get('/:id', async (c) => {
 
 const REQUIRED_FIELDS = ['name', 'type_id', 'state_id', 'country_id', 'lat', 'lng', 'address', 'source'] as const
 
-masjidsRouter.post('/', authMiddleware, async (c) => {
+masjidsRouter.post('/', async (c) => {
   let body: Record<string, unknown>
   try {
     body = await c.req.json()
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400)
+    return c.json(errorBody('Invalid JSON body', 'validation_failed'), 422)
   }
 
   // D-07: validate required fields
   for (const field of REQUIRED_FIELDS) {
     if (body[field] === undefined || body[field] === null || body[field] === '') {
-      return c.json({ error: `Missing required field: ${field}` }, 400)
+      return c.json(errorBody(`Missing required field: ${field}`, 'validation_failed'), 422)
     }
   }
 
@@ -314,10 +315,10 @@ const PATCHABLE_FIELDS = [
   'address', 'description', 'telephone', 'email', 'google_url', 'jumaat_available', 'source',
 ] as const
 
-masjidsRouter.patch('/:id', authMiddleware, async (c) => {
+masjidsRouter.patch('/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
   if (isNaN(id)) {
-    return c.json({ error: 'Invalid id' }, 400)
+    return c.json(errorBody('Invalid id', 'validation_failed'), 422)
   }
 
   // D-16: pre-PATCH existence check — exclude deleted records (Pitfall 6)
@@ -326,21 +327,21 @@ masjidsRouter.patch('/:id', authMiddleware, async (c) => {
     .bind(id)
     .first()
   if (!existing) {
-    return c.json({ error: 'Masjid not found' }, 404)
+    return c.json(errorBody('Masjid not found', 'not_found'), 404)
   }
 
   let body: Record<string, unknown>
   try {
     body = await c.req.json()
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400)
+    return c.json(errorBody('Invalid JSON body', 'validation_failed'), 422)
   }
 
   // D-14: lat and lng must both be present or neither (Pitfall 4)
   const hasLat = 'lat' in body
   const hasLng = 'lng' in body
   if (hasLat !== hasLng) {
-    return c.json({ error: 'lat and lng must both be provided together' }, 400)
+    return c.json(errorBody('lat and lng must both be provided together', 'validation_failed'), 422)
   }
 
   // Filter body to allowed fields only — strips internal fields (T-3-08)
@@ -350,7 +351,7 @@ masjidsRouter.patch('/:id', authMiddleware, async (c) => {
   }
 
   if (Object.keys(updates).length === 0) {
-    return c.json({ error: 'No patchable fields provided' }, 400)
+    return c.json(errorBody('No patchable fields provided', 'validation_failed'), 422)
   }
 
   // D-14: recompute geohash when coordinates change

@@ -1,15 +1,20 @@
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { cors } from 'hono/cors'
 import openApiSpec from '../openapi.json' with { type: 'json' }
 import { masjidsRouter } from './routes/masjids'
 import { statesRouter } from './routes/states'
 import { citiesRouter } from './routes/cities'
+import { authMiddleware, writeGuard, type AppEnv } from './middleware/auth'
+import { rateLimitMiddleware } from './middleware/rate-limit'
+import { ApiError, errorBody } from './lib/errors'
 
-const app = new Hono<{ Bindings: CloudflareBindings }>()
+const app = new Hono<AppEnv>()
 
-// D-03 / CORS-01: global CORS — all read endpoints are public, browser consumers need this
-app.use('*', cors())
+// No CORS: keys are server-side only (contract R1).
+// Every route needs a key except GET / and GET /openapi.json (handled inside authMiddleware).
+app.use('*', authMiddleware)
+app.use('*', rateLimitMiddleware)
+app.use('*', writeGuard)
 
 app.get('/openapi.json', (c) => {
   return c.json(openApiSpec)
@@ -23,19 +28,22 @@ app.route('/masjids', masjidsRouter)
 app.route('/states', statesRouter)
 app.route('/cities', citiesRouter)
 
-// D-13: log real error, return generic 500 message (no stack traces in responses)
-// HTTPException (e.g. bearerAuth 401) is passed through as-is — not treated as a 500
+// Error shape: { error, code, details? } (contract §1). No stack traces in responses.
 app.onError((err, c) => {
+  if (err instanceof ApiError) {
+    return c.json(errorBody(err.message, err.code, err.details), err.status as 401, err.headers)
+  }
   if (err instanceof HTTPException) {
-    return err.getResponse()
+    const res = err.getResponse()
+    const code = err.status === 401 ? 'unauthorized' : err.status === 403 ? 'forbidden' : err.status === 404 ? 'not_found' : 'validation_failed'
+    return c.json(errorBody(err.message || 'Request failed', code), err.status as 401, Object.fromEntries(res.headers))
   }
   console.error(err)
-  return c.json({ error: 'Internal server error' }, 500)
+  return c.json(errorBody('Internal server error', 'internal'), 500)
 })
 
-// D-12: 404 error contract
 app.notFound((c) => {
-  return c.json({ error: 'Not found' }, 404)
+  return c.json(errorBody('Not found', 'not_found'), 404)
 })
 
 export default app
