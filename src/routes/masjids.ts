@@ -7,7 +7,7 @@ import {
   EVENT_COLUMNS, hydrateEvents, hydrateMasjids, loadMasjid, loadMasjidsByIds, MASJID_COLUMNS, normaliseImages,
   type EventEntity, type MasjidEntity, type MasjidScalars,
 } from '../lib/entities'
-import { eventDeleteSpec, findHolder, masjidNotActive, tombstoneUnlinkSpec } from '../lib/specs'
+import { eventDeleteSpec, findHolder, masjidDeleteSpecs, masjidNotActive, tombstoneUnlinkSpec } from '../lib/specs'
 import {
   beginWrite, commitWrite, replayOnConflict, parseJsonObject, versionConflict, type WriteCtx, type WriteSpec,
 } from '../lib/write'
@@ -658,8 +658,6 @@ masjidsRouter.put('/:id/external-ids/:app_id', async (c) => {
   })
 })
 
-const MAX_CASCADE_EVENTS = 200
-
 // Soft delete. The tombstone keeps its external ids so apps can still match the delete. The masjid's programmes
 // are soft-deleted in the same batch (each with a version bump and its own `event` `delete` change row).
 masjidsRouter.delete('/:id', async (c) => {
@@ -672,48 +670,7 @@ masjidsRouter.delete('/:id', async (c) => {
     const before = await loadMasjid(ctx.db, id)
     if (!before || before.status !== 'active') throw masjidNotActive(before)
     if (before.version !== ctx.ifMatch) throw versionConflict(before)
-
-    const eventRows = await ctx.db
-      .prepare(`SELECT ${EVENT_COLUMNS} FROM masjid_events WHERE masjid_id = ? AND status != 'deleted' ORDER BY id LIMIT ?`)
-      .bind(id, MAX_CASCADE_EVENTS + 1)
-      .all<Omit<EventEntity, 'external_ids'>>()
-    if (eventRows.results.length > MAX_CASCADE_EVENTS) {
-      throw new ApiError(
-        422, 'validation_failed',
-        `This masjid has more than ${MAX_CASCADE_EVENTS} programmes; delete some of them first, then delete the masjid`,
-        { reason: 'too_many_events', max_events: MAX_CASCADE_EVENTS },
-      )
-    }
-    const events = await hydrateEvents(ctx.db, eventRows.results)
-
-    const now = isoNow()
-    const after: MasjidEntity = { ...before, status: 'deleted', version: before.version + 1, updated_by_app: ctx.originApp, updated_at: now }
-    const masjidSpec: WriteSpec = {
-      entity: 'masjid',
-      op: 'delete',
-      entityId: id,
-      baseVersion: before.version,
-      masjidId: null,
-      changedFields: ['status'],
-      before,
-      after,
-      entityStatement: ctx.db
-        .prepare(
-          `UPDATE masjids SET status = 'deleted', deleted_at = ?, version = version + 1, updated_by_app = ?, updated_at = ?
-           WHERE id = ? AND version = ?`,
-        )
-        .bind(now, ctx.originApp, now, id, before.version),
-      // A programme created after we listed them would be left active under a deleted masjid: abort and let the client retry.
-      preGuards: [{
-        condition: `NOT EXISTS (SELECT 1 FROM masjid_events WHERE masjid_id = ? AND status != 'deleted'
-                                AND id NOT IN (SELECT value FROM json_each(?)))`,
-        binds: [id, JSON.stringify(events.map(e => e.id))],
-      }],
-      onPreconditionLost: async () => versionConflict(await loadMasjid(ctx.db, id)),
-      loadCurrent: () => loadMasjid(ctx.db, id),
-      status: 200,
-    }
-    return commitWrite(c, ctx, [masjidSpec, ...events.map(e => eventDeleteSpec(ctx, e, now))])
+    return commitWrite(c, ctx, await masjidDeleteSpecs(ctx, before, isoNow()))
   })
 })
 

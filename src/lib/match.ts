@@ -159,6 +159,47 @@ export interface MatchCandidate {
 
 export const CANDIDATE_RADIUS_M = 1000
 
+export interface CandidateRow {
+  id: number
+  name: string
+  type_id: string
+  lat: number
+  lng: number
+  address: string | null
+}
+
+/**
+ * The bounded search statement: active masjids inside a lat/lng box plus at most 16 geohash cells around the point,
+ * forced onto the geohash index. Callers filter by haversine (see `scoreRows`). Shared by `findCandidates` and the
+ * duplicate scan (which batches many of these in one D1 call).
+ */
+export function candidateStatement(db: D1Database, lat: number, lng: number, radiusM: number): D1PreparedStatement {
+  const where = windowWhere(searchWindow(lat, lng, radiusM))
+  return db
+    .prepare(
+      `SELECT id, name, type_id, lat, lng, address FROM masjids INDEXED BY ${where.index}
+       WHERE status = 'active' AND ${where.sql}`,
+    )
+    .bind(...where.binds)
+}
+
+/** Rows within `radiusM` of the point, scored against `name`, best first (ties: nearer, then lower id). */
+export function scoreRows(
+  rows: CandidateRow[],
+  lat: number,
+  lng: number,
+  name: string,
+  radiusM: number,
+  excludeId?: number,
+): Array<{ r: CandidateRow; d: number; score: number }> {
+  return rows
+    .filter(r => r.id !== excludeId)
+    .map(r => ({ r, d: haversineM(lat, lng, r.lat, r.lng) }))
+    .filter(x => x.d <= radiusM)
+    .map(x => ({ ...x, score: matchScore(name, x.r.name, x.d) }))
+    .sort((a, b) => b.score - a.score || a.d - b.d || a.r.id - b.r.id)
+}
+
 /**
  * Active masjids within 1 km of the point, scored against `name` and sorted best first
  * (ties: nearer, then lower id). Uses a lat/lng box plus at most 16 geohash cells, then haversine. Returns the best 50 (callers slice the top N).
@@ -170,21 +211,8 @@ export async function findCandidates(
   name: string,
   opts: { excludeId?: number; typeId?: string } = {},
 ): Promise<MatchCandidate[]> {
-  const where = windowWhere(searchWindow(lat, lng, CANDIDATE_RADIUS_M))
-  const rows = await db
-    .prepare(
-      `SELECT id, name, type_id, lat, lng, address FROM masjids INDEXED BY ${where.index}
-       WHERE status = 'active' AND ${where.sql}`,
-    )
-    .bind(...where.binds)
-    .all<{ id: number; name: string; type_id: string; lat: number; lng: number; address: string | null }>()
-
-  const scored = rows.results
-    .filter(r => r.id !== opts.excludeId)
-    .map(r => ({ r, d: haversineM(lat, lng, r.lat, r.lng) }))
-    .filter(x => x.d <= CANDIDATE_RADIUS_M)
-    .map(x => ({ ...x, score: matchScore(name, x.r.name, x.d) }))
-    .sort((a, b) => b.score - a.score || a.d - b.d || a.r.id - b.r.id)
+  const rows = await candidateStatement(db, lat, lng, CANDIDATE_RADIUS_M).all<CandidateRow>()
+  const scored = scoreRows(rows.results, lat, lng, name, CANDIDATE_RADIUS_M, opts.excludeId)
 
   if (scored.length === 0) return []
 

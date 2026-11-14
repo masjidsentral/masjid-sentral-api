@@ -9,6 +9,7 @@ import { adminRouter } from './routes/admin'
 import { eventsRouter } from './routes/events'
 import { facilitiesRouter } from './routes/facilities'
 import { dispatchDue, purgeIdempotency } from './lib/webhooks'
+import { runDuplicateScan } from './lib/scan'
 import { authMiddleware, requireScope, writeGuard, type AppEnv } from './middleware/auth'
 import { rateLimitMiddleware } from './middleware/rate-limit'
 import { ApiError, errorBody } from './lib/errors'
@@ -65,10 +66,22 @@ app.notFound((c) => {
 
 export { app }
 
-// Default export carries both handlers: HTTP and the per-minute cron (webhook dispatch, idempotency sweep).
+/** The daily duplicate scan (03:00 MYT). The per-minute trigger does everything else. */
+export const SCAN_CRON = '0 19 * * *'
+
+// Default export carries both handlers: HTTP and the cron triggers. `* * * * *`: webhook dispatch and the
+// idempotency sweep. `0 19 * * *`: the duplicate scan.
 export default {
   fetch: app.fetch,
-  async scheduled(_controller: ScheduledController, env: CloudflareBindings, ctx: ExecutionContext) {
+  async scheduled(controller: ScheduledController, env: CloudflareBindings, ctx: ExecutionContext) {
+    if (controller.cron === SCAN_CRON) {
+      ctx.waitUntil(
+        runDuplicateScan(env.DB)
+          .then(stats => console.log('duplicate scan', JSON.stringify(stats)))
+          .catch(err => console.error('duplicate scan failed', err)),
+      )
+      return
+    }
     ctx.waitUntil(Promise.all([
       dispatchDue(env.DB),
       purgeIdempotency(env.DB),

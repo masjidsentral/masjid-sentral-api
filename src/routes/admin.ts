@@ -5,6 +5,11 @@ import { Hono } from 'hono'
 import { ApiError } from '../lib/errors'
 import { newSecret } from '../lib/webhooks'
 import { getActor, type AppEnv } from '../middleware/auth'
+import { loadMasjidsByIds } from '../lib/entities'
+import { buildMergeSpecs, buildRevertSpecs } from '../lib/admin'
+import { decodeCursor, encodeCursor, intParam } from '../lib/page'
+import { isoNow } from '../lib/time'
+import { beginWrite, commitWrite, parseJsonObject, replayOnConflict, type WriteCtx } from '../lib/write'
 
 export const adminRouter = new Hono<AppEnv>()
 
@@ -80,4 +85,160 @@ adminRouter.delete('/webhooks/:id', async (c) => {
   ])
   if ((deleted.meta.changes ?? 0) === 0) throw new ApiError(404, 'not_found', 'Webhook not found')
   return c.body(null, 204)
+})
+
+// ─── Merge, revert, duplicate queue (S4) ─────────────────────────────────────
+
+function parseIdParam(raw: string, name = 'id'): number {
+  if (!/^\d{1,15}$/.test(raw)) fail(`Invalid ${name}`, name)
+  const n = Number(raw)
+  if (n < 1) fail(`Invalid ${name}`, name)
+  return n
+}
+
+function parseInto(body: Record<string, unknown>): number {
+  const into = body.into
+  if (typeof into !== 'number' || !Number.isInteger(into) || into < 1) fail('into must be a positive integer masjid id', 'into')
+  return into
+}
+
+function parseReason(body: Record<string, unknown>): string | null {
+  const r = body.reason
+  if (r === undefined || r === null) return null
+  // eslint-disable-next-line no-control-regex
+  if (typeof r !== 'string' || r.length > 500 || /[\u0000-\u001f\u007f-\u009f]/.test(r)) fail('reason must be text of at most 500 characters', 'reason')
+  return r.trim() === '' ? null : r.trim()
+}
+
+// POST /admin/masjids/:id/merge { into, reason }: the masjid in the path is the duplicate that is removed.
+adminRouter.post('/masjids/:id/merge', async (c) => {
+  const loserId = parseIdParam(c.req.param('id'))
+  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    const into = parseInto(body)
+    const reason = parseReason(body)
+    return commitWrite(c, ctx, await buildMergeSpecs(ctx, loserId, into, reason, isoNow()))
+  })
+})
+
+// POST /admin/changes/:seq/revert: applies the change's before_json as a new write (actor "revert:<seq>").
+adminRouter.post('/changes/:seq/revert', async (c) => {
+  const seq = parseIdParam(c.req.param('seq'), 'seq')
+  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+  return replayOnConflict(ctx, async () => {
+    try {
+      return await commitWrite(c, ctx, await buildRevertSpecs(ctx, seq, isoNow()))
+    } catch (err) {
+      if (!(err instanceof ApiError) && String(err instanceof Error ? err.message : err).includes('UNIQUE')) {
+        throw new ApiError(409, 'already_linked', 'An external id from the logged state now belongs to another entity')
+      }
+      throw err
+    }
+  })
+})
+
+interface DuplicateRow {
+  id: number
+  masjid_a: number
+  masjid_b: number
+  score: number
+  distance_m: number
+  status: string
+  created_at: string
+  resolved_at: string | null
+}
+
+const DUP_COLUMNS = 'id, masjid_a, masjid_b, score, distance_m, status, created_at, resolved_at'
+
+async function duplicateView(db: D1Database, rows: DuplicateRow[]) {
+  const masjids = await loadMasjidsByIds(db, [...new Set(rows.flatMap(r => [r.masjid_a, r.masjid_b]))])
+  const byId = new Map(masjids.map(m => [m.id, m]))
+  const summary = (id: number) => {
+    const m = byId.get(id)
+    return m
+      ? { id: m.id, name: m.name, type_id: m.type_id, lat: m.lat, lng: m.lng, address: m.address, status: m.status, external_ids: m.external_ids }
+      : { id, name: null, type_id: null, lat: null, lng: null, address: null, status: 'missing', external_ids: [] }
+  }
+  return rows.map(r => ({
+    id: r.id,
+    status: r.status,
+    score: r.score,
+    distance_m: r.distance_m,
+    same_type: byId.get(r.masjid_a)?.type_id === byId.get(r.masjid_b)?.type_id,
+    masjid_a: summary(r.masjid_a),
+    masjid_b: summary(r.masjid_b),
+    created_at: r.created_at,
+    resolved_at: r.resolved_at,
+  }))
+}
+
+// GET /admin/duplicates?status=pending|merged|dismissed|all&limit&cursor
+adminRouter.get('/duplicates', async (c) => {
+  const status = c.req.query('status') ?? 'pending'
+  if (!['pending', 'merged', 'dismissed', 'all'].includes(status)) fail('status must be pending, merged, dismissed or all', 'status')
+  const limit = intParam(c.req.query('limit'), 'limit', 20, 1, 100)
+  const raw = decodeCursor(c.req.query('cursor'))
+  const after = raw === null ? 0 : /^\d{1,15}$/.test(raw) ? Number(raw) : fail('cursor is not valid', 'cursor')
+
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT ${DUP_COLUMNS} FROM duplicate_candidates WHERE id > ? AND (? = 'all' OR status = ?) ORDER BY id LIMIT ?`,
+    )
+    .bind(after, status, status, limit + 1)
+    .all<DuplicateRow>()
+  const page = rows.results.slice(0, limit)
+  return c.json({
+    data: await duplicateView(c.env.DB, page),
+    next_cursor: rows.results.length > limit ? encodeCursor(String(page[page.length - 1].id)) : null,
+  })
+})
+
+async function loadDuplicate(db: D1Database, id: number): Promise<DuplicateRow> {
+  const row = await db.prepare(`SELECT ${DUP_COLUMNS} FROM duplicate_candidates WHERE id = ?`).bind(id).first<DuplicateRow>()
+  if (!row) throw new ApiError(404, 'not_found', 'Duplicate candidate not found')
+  return row
+}
+
+// POST /admin/duplicates/:id/dismiss: "these are different places". Dismissing twice is a no-op.
+adminRouter.post('/duplicates/:id/dismiss', async (c) => {
+  const id = parseIdParam(c.req.param('id'))
+  const res = await c.env.DB
+    .prepare("UPDATE duplicate_candidates SET status = 'dismissed', resolved_at = ? WHERE id = ? AND status = 'pending'")
+    .bind(isoNow(), id)
+    .run()
+  const row = await loadDuplicate(c.env.DB, id)
+  if ((res.meta.changes ?? 0) === 0 && row.status !== 'dismissed') {
+    throw new ApiError(422, 'validation_failed', `This pair is already ${row.status}`, { reason: 'not_pending', status: row.status })
+  }
+  return c.json((await duplicateView(c.env.DB, [row]))[0])
+})
+
+// POST /admin/duplicates/:id/merge { into }: `into` must be masjid_a or masjid_b; the other one is merged into it.
+// Same write as POST /admin/masjids/:id/merge; the queue row becomes `merged` in the same batch and every other
+// pending row involving the removed masjid becomes `dismissed`.
+adminRouter.post('/duplicates/:id/merge', async (c) => {
+  const id = parseIdParam(c.req.param('id'))
+  const begin = await beginWrite(c, { requireIfMatch: false, idempotencyOptional: true })
+  if ('replay' in begin) return begin.replay
+  const ctx: WriteCtx = begin.ctx
+  return replayOnConflict(ctx, async () => {
+    const body = parseJsonObject(ctx)
+    const into = parseInto(body)
+    const row = await loadDuplicate(ctx.db, id)
+    if (row.status !== 'pending') {
+      throw new ApiError(422, 'validation_failed', `This pair is already ${row.status}`, { reason: 'not_pending', status: row.status })
+    }
+    if (into !== row.masjid_a && into !== row.masjid_b) {
+      throw new ApiError(422, 'validation_failed', 'into must be one of the two masjids in the pair', {
+        field: 'into', masjid_a: row.masjid_a, masjid_b: row.masjid_b,
+      })
+    }
+    const loser = into === row.masjid_a ? row.masjid_b : row.masjid_a
+    return commitWrite(c, ctx, await buildMergeSpecs(ctx, loser, into, parseReason(body), isoNow()))
+  })
 })
