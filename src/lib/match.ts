@@ -1,16 +1,20 @@
-import { geohashRanges, geohashWhere, haversineM } from './geo'
+import { searchWindow, windowWhere, haversineM } from './geo'
 
-/** Words dropped from the start of a name (spec 4.1). */
-const LEADING_WORDS = new Set(['masjid', 'surau', 'musolla', 'musalla', 'mini'])
+/** Words dropped from the start of a name (spec 4.1 + S3 review). */
+const LEADING_WORDS = new Set([
+  'masjid', 'mosque', 'surau', 'musolla', 'musalla', 'musholla', 'mushola', 'langgar', 'mini',
+])
 /** Arabic definite-article forms that join the next word: "al hidayah" and "al-hidayah" are both "alhidayah". */
 const ARTICLES = new Set(['al', 'ar', 'an', 'as', 'ad', 'at', 'az', 'ash', 'adh', 'ath', 'el'])
+/** Common abbreviations and spelling variants expanded before comparing ("Kg Baru" = "Kampung Baru"). */
+const ABBREVIATIONS: Record<string, string> = {
+  kg: 'kampung', kpg: 'kampung', tmn: 'taman', jln: 'jalan', bdr: 'bandar', bt: 'batu',
+  seri: 'sri', sg: 'sungai', bkt: 'bukit', tg: 'tanjung',
+}
+const ROMAN = new Set(['ii', 'iii', 'iv', 'vi', 'vii', 'viii', 'ix'])
 
-/**
- * Normalises a masjid name for comparison: lowercase, strip diacritics and punctuation, collapse spaces,
- * drop leading masjid/surau/musolla/musalla/mini, glue articles to the next word.
- * A name made only of those leading words ("Masjid") keeps them, so it can still be compared.
- */
-export function normaliseName(raw: string): string {
+/** Lowercase, diacritics and punctuation removed, abbreviations expanded, leading mosque words dropped. */
+function nameTokens(raw: string): string[] {
   const tokens = raw
     .normalize('NFD')
     .replace(/\p{M}+/gu, '')
@@ -19,21 +23,49 @@ export function normaliseName(raw: string): string {
     .trim()
     .split(' ')
     .filter(Boolean)
+    .map(t => ABBREVIATIONS[t] ?? t)
 
   let start = 0
   while (start < tokens.length && LEADING_WORDS.has(tokens[start])) start++
-  const kept = start === tokens.length ? tokens : tokens.slice(start)
+  // A name made only of those leading words ("Masjid") keeps them, so it can still be compared.
+  return start === tokens.length ? tokens : tokens.slice(start)
+}
 
+/** Glues articles to the next word (`glue`) or drops them (`!glue`: "al hidayah" -> "hidayah"). */
+function applyArticles(tokens: string[], glue: boolean): string {
   const out: string[] = []
-  for (let i = 0; i < kept.length; i++) {
-    if (ARTICLES.has(kept[i]) && i + 1 < kept.length) {
-      out.push(kept[i] + kept[i + 1])
+  for (let i = 0; i < tokens.length; i++) {
+    if (ARTICLES.has(tokens[i]) && i + 1 < tokens.length) {
+      if (glue) out.push(tokens[i] + tokens[i + 1])
+      else out.push(tokens[i + 1])
       i++
     } else {
-      out.push(kept[i])
+      out.push(tokens[i])
     }
   }
   return out.join(' ')
+}
+
+/**
+ * Normalises a masjid name for comparison: lowercase, strip diacritics and punctuation, collapse spaces,
+ * expand abbreviations, drop leading masjid/mosque/surau/musolla/musalla/musholla/mushola/langgar/mini,
+ * glue articles to the next word.
+ */
+export function normaliseName(raw: string): string {
+  return applyArticles(nameTokens(raw), true)
+}
+
+/** Both article forms: glued ("alhidayah") and with the article removed ("hidayah"). */
+export function normaliseVariants(raw: string): string[] {
+  const tokens = nameTokens(raw)
+  return [...new Set([applyArticles(tokens, true), applyArticles(tokens, false)])]
+}
+
+/** Number tokens (digits, roman numerals ii-ix) and single-letter tokens: "Fasa 1", "Blok A". */
+function distinguishingTokens(raw: string): string[] {
+  return nameTokens(raw)
+    .filter(t => /^\d+$/.test(t) || ROMAN.has(t) || /^\p{L}$/u.test(t))
+    .sort()
 }
 
 export function jaro(a: string, b: string): number {
@@ -85,12 +117,24 @@ export function jaroWinkler(a: string, b: string): number {
   return j + prefix * 0.1 * (1 - j)
 }
 
-/** Name similarity of two raw names, 0-1. Two names that are empty after normalising score 0. */
+/** Name similarity is capped here when the names differ in a number or single-letter token. */
+export const TOKEN_CONFLICT_CAP = 0.8
+
+/**
+ * Name similarity of two raw names, 0-1: the best Jaro-Winkler over the article forms of each name (glued and
+ * removed), capped at 0.8 when they differ in a number or single-letter token ("Fasa 1" vs "Fasa 2",
+ * "Blok A" vs "Blok B"). Two names that are empty after normalising score 0.
+ */
 export function nameSimilarity(a: string, b: string): number {
-  const na = normaliseName(a)
-  const nb = normaliseName(b)
-  if (na === '' || nb === '') return 0
-  return jaroWinkler(na, nb)
+  const va = normaliseVariants(a)
+  const vb = normaliseVariants(b)
+  if (va[0] === '' || vb[0] === '') return 0
+  let best = 0
+  for (const x of va) for (const y of vb) best = Math.max(best, jaroWinkler(x, y))
+  const ta = distinguishingTokens(a)
+  const tb = distinguishingTokens(b)
+  if (ta.join(' ') !== tb.join(' ')) best = Math.min(best, TOKEN_CONFLICT_CAP)
+  return best
 }
 
 /** score = round(0.7 * name_sim + 0.3 * dist_score, 3), dist_score = max(0, 1 - distance_m / 500). */
@@ -109,25 +153,27 @@ export interface MatchCandidate {
   external_ids: Array<{ app_id: string; external_id: string }>
   score: number
   distance_m: number
+  /** Same type_id as the one supplied; null when the caller supplied none. */
+  same_type: boolean | null
 }
 
 export const CANDIDATE_RADIUS_M = 1000
 
 /**
  * Active masjids within 1 km of the point, scored against `name` and sorted best first
- * (ties: nearer, then lower id). Uses the geohash index, then haversine. Returns the best 50 (callers slice the top N).
+ * (ties: nearer, then lower id). Uses a lat/lng box plus at most 16 geohash cells, then haversine. Returns the best 50 (callers slice the top N).
  */
 export async function findCandidates(
   db: D1Database,
   lat: number,
   lng: number,
   name: string,
-  opts: { excludeId?: number } = {},
+  opts: { excludeId?: number; typeId?: string } = {},
 ): Promise<MatchCandidate[]> {
-  const where = geohashWhere(geohashRanges(lat, lng, CANDIDATE_RADIUS_M))
+  const where = windowWhere(searchWindow(lat, lng, CANDIDATE_RADIUS_M))
   const rows = await db
     .prepare(
-      `SELECT id, name, type_id, lat, lng, address FROM masjids
+      `SELECT id, name, type_id, lat, lng, address FROM masjids INDEXED BY ${where.index}
        WHERE status = 'active' AND ${where.sql}`,
     )
     .bind(...where.binds)
@@ -168,5 +214,6 @@ export async function findCandidates(
     external_ids: byMasjid.get(x.r.id) ?? [],
     score: x.score,
     distance_m: Math.round(x.d),
+    same_type: opts.typeId === undefined ? null : x.r.type_id === opts.typeId,
   }))
 }
