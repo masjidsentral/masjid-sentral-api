@@ -186,7 +186,7 @@ All require `read`. Writes also require `write`.
 
 `GET /states?country=`, `GET /cities?state=`, `GET /facilities` (**NEW**, the facility code catalogue: `{ "data": [ { code, label_en, label_ms, sort_order } ] }`).
 
-From migration 006, states and cities cover all four countries (MY 16 states / 444 cities, SG 1 / 55, BN 4 / 40, ID 38 / 514). Ids are lowercase ASCII slugs: state `<country>-<slug>` (Malaysia keeps `my-jhr`…), city `<state_id>-<slug>`. Singapore has one state `sg-singapore` whose cities are the 55 URA planning areas. Brunei states are the 4 districts and cities are mukims. Indonesia cities are kabupaten and kota, always prefixed `kab-` or `kota-` (`id-jawa-barat-kab-bogor`, `id-jawa-barat-kota-bogor`). Malaysian cities are Pos Malaysia post towns (`my-sgr-shah-alam`), one per state and town.
+From migration 006, states and cities cover all four countries (MY 16 states / 442 cities, SG 1 / 55, BN 4 / 40, ID 38 / 514). Ids are lowercase ASCII slugs: state `<country>-<slug>` (Malaysia keeps `my-jhr`…), city `<state_id>-<slug>`. Singapore has one state `sg-singapore` whose cities are the 55 URA planning areas. Brunei states are the 4 districts and cities are mukims. Indonesia cities are kabupaten and kota, always prefixed `kab-` or `kota-` (`id-jawa-barat-kab-bogor`, `id-jawa-barat-kota-bogor`). Malaysian cities are Pos Malaysia post towns (`my-sgr-shah-alam`), one per state and town.
 
 ### 5.4 Write responses and conflicts
 
