@@ -24,7 +24,7 @@
       // Fresh D1 for the v1.1 rebuild (owner creates it; see PROGRESS_app-sync.md checklist).
       // The old D1 masjidsentral (28e4a5dc-18d5-4d5c-a080-c629179764ad) stays untouched as the backup.
       "database_name": "masjidsentral-v2",
-      "database_id": "REPLACE_WITH_NEW_D1_ID",
+      "database_id": "7757e23e-277c-45ed-b111-9096f16e4063",
       "migrations_dir": "../masjidsentral-db-schema/migrations"
     }
   ]
