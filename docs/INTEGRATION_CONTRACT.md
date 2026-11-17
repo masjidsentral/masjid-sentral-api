@@ -7,7 +7,7 @@
 
 | | |
 |---|---|
-| Status | **DRAFT v1.1**, 2026-11-14. Endpoints marked **NEW** are not deployed yet. |
+| Status | **v1.1, live 2026-11-17** at `https://api.masjidsentral.com`. Endpoints marked **NEW** are new in v1.1 and are deployed. Keys are handed out privately by the maintainers. |
 | Maintainers | Jejak Masjid (JM) × Qiyam |
 | Base URL | `https://api.masjidsentral.com` (prod). A staging URL is handed out with your key. |
 | Audience | Any app that reads or writes Masjid Sentral data (first: JM, Qiyam) |
@@ -294,6 +294,23 @@ X-Sentral-Delivery: dlv_01JD…
 
 ## 9. Build order for your agent
 
+0. **Send new masjids now (create-only push) — start this first (maintainers 2026-11-17).** Sentral is live at `https://api.masjidsentral.com`, and new masjids keep being added in both apps before the full link jobs run. Ship this small piece now so every new masjid reaches Sentral from day one; the link jobs (step 2) later skip anything that already has a `sentral_id`.
+   - **Never block your user.** Save the masjid locally and answer the user as you do today. Sending to Sentral happens in the background (queue, cron or outbox drain). Never call Sentral inside the user's request.
+   - **But never drop it either.** A failed send stays queued and is retried. Keep a durable row per masjid (the `sentral_outbox` of step 1 is enough; `entity='masjid'`, `op='create'`).
+   - **Only moderated masjids.** Enqueue when your moderation approves the masjid (R7), not when a user submits it.
+   - **Request.** `POST /masjids` with `Idempotency-Key: <app_id>-masjid-create-<local_id>`, `X-Sentral-Actor: system` (or the opaque moderator id) and the body `name, type_id, country_id, state_id, city_id (or null), lat, lng, address, external_id: "<local_id>"`. `name`, `type_id`, `country_id`, `state_id`, `lat`, `lng` and `address` are required. Do not round coordinates (R9). **Build the body once and store it**; every retry sends the exact stored body with the same key (a different body under the same key is `409 idempotency_mismatch`).
+   - **Results:**
+
+     | Response | Do |
+     |---|---|
+     | `201` | Store `sentral_id = body.id`, `sentral_version = body.version`. Done. |
+     | `409 already_linked` | Your id is already in Sentral: store `details.masjid_id`, then `GET /masjids/{id}` and store its `version`. Done. |
+     | `409 possible_duplicate` | If the top `details.candidates[0]` has `score >= 0.9`, `distance_m <= 50` and `same_type: true`: `PUT /masjids/{id}/external-ids/<app_id>` with `{ "external_id": "<local_id>" }`, store `id` and the returned `version`. Otherwise (or if that PUT returns `409 already_linked`) mark the row `needs_review` for a person. **Never send `?force=true` automatically.** |
+     | `429`, `5xx`, network error, timeout | Retry later with the same key and body (exponential backoff, e.g. 1 min doubling to 6 h). |
+     | `401`, `403` | Configuration problem (key or scope). Keep the row, retry later, alert the maintainers. |
+     | `422` | Your data does not fit (e.g. an unmapped `state_id` or unknown `type_id`). Mark the row `failed` with the error, do not retry, fix the mapping and requeue. |
+   - **Reference ids.** Map your state and district/city to `GET /states?country=` and `GET /cities?state=` ids. `city_id` is optional: send `null` rather than a guess.
+   - **Edits are not sent yet.** Only creates. Edits, deletes and programmes follow in step 3. Your later inbound sync sees your own creates in `/changes`; R2 skips them because you stored `sentral_version`.
 1. **Schema in your app.** Add to your masjid table: `sentral_id INTEGER UNIQUE NULL` and `sentral_version INTEGER NOT NULL DEFAULT 0`. Add the same two columns to your programme table. Add a table `sentral_outbox(id, entity, local_id, sentral_id, op, payload_json, base_version, attempts, next_attempt_at, last_error, status)` and a table `sentral_cursor(last_seq)`.
 2. **Initial link (one-off job, resumable).** **Rebuild (maintainers 2026-11-14):** the old v1.0 import kept no app ids and over-merged, so Sentral's masjid table is rebuilt empty. **Qiyam's link job runs first** and creates the base set; **JM's link job runs after Qiyam's finishes**, matches against it and handles the duplicate checking and review. Do not start JM's run until the maintainers say Qiyam's is done. The job is the import: there is no CSV step. **Re-run it nightly** until your outbound sync (step 3) is live, so masjids added in your app in the meantime are picked up. It only touches masjids without a `sentral_id`, so re-runs are safe. **Links are one-to-one:** if a Sentral row is already linked to another of your masjids, do not link a second one; send both to the review list. For each local masjid without `sentral_id`:
    - `GET /masjids/by-external/{you}/{local_id}`. Found → link.
