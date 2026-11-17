@@ -205,23 +205,25 @@ Interpretations / things for the orchestrator
 6. No endpoint triggers a scan on demand; the daily cron only. To test locally call `runDuplicateScan(env.DB)`.
 7. The `ms_live_` admin test key has `app_id: sentral_admin`; a production admin key may have a null `app_id`; both work (`beginWrite` falls back to `sentral_admin`).
 
-### Consolidated owner deploy checklist (S1-S4, updated after the S4 review)
+### Consolidated owner deploy checklist (S1-S4; rewritten 2026-11-17 for the fresh D1 on the Sentral account)
 
-1. Ship S1-S4 together, never S1 alone (reads need keys from S1; 004 empties masjid data).
-2. Check remote `d1_migrations`: `001` and `002` recorded and `api_keys` present (record them by hand first if they were applied outside wrangler).
-3. Check the account plan before relying on the scan: the free plan allows 50 subrequests and 10 ms CPU per invocation. A scan run is about 7 D1 calls, but Jaro-Winkler on 150 masjids may exceed 10 ms CPU on free; on the paid plan it is fine. `GET /admin/scan` shows `last_error` after the first runs; lower `SCAN_MAX_MASJIDS` (`src/lib/scan.ts`) if a run fails.
-4. **Reference-table diff before migrating** (review M2): diff prod `countries`, `states`, `cities`, `masjid_types` against 001 HEAD (`SELECT * FROM ...` vs the INSERTs in `001_initial.sql`). 005 adds `mini-surau` and removes `musolla` from `masjid_types`; any other drift (missing states/cities, renamed ids) must be fixed by hand first, because 004 recreates `masjids` with FKs to them.
-5. D1 Time Travel bookmark of `masjidsentral` (004 is destructive). Write the bookmark down.
-6. Prepare the Worker build, the keys and the webhook calls so the next four steps run **back to back**: migrations, keys, deploy, crons and webhooks. The old Worker breaks as soon as 004 drops `source` (it writes `masjids.source`), so do not leave a gap.
-7. Apply migrations `003`, `004`, `005` remotely (new auth reads 003's columns; the hourly cron reads 005's tables).
-8. Issue keys with `scripts/issue-key.mjs <app_id> <scopes>` and insert them: `qiyam` (read,write), `jejak_masjid` (read,write), an admin key (admin), and a `webhook`-scoped key per receiving app (it needs an `app_id`; may be the app's own key with `read,write,webhook`).
-9. Rate-limit `namespace_id`: "1001" is fine as long as it is unique on this Cloudflare account (no other Worker uses it); 600 per 60 s.
-10. Deploy the Worker; it registers two crons: `* * * * *` (webhook dispatch, idempotency sweep) and `0 * * * *` (duplicate scan, hourly, 150 masjids per run). Check both appear in the dashboard.
-11. Register webhooks with the admin key: `POST /admin/webhooks { api_key_id, url }` for Qiyam and JM (https only; secret shown once; duplicate registration is 409 `already_exists`).
-12. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch `GET /admin/scan` (cursor, `masjids_remaining`, `last_error`) and the first `duplicate scan {...}` log lines.
-13. **Rollback = D1 Time Travel restore to the step-5 bookmark AND a Worker rollback, never the Worker alone** (the old Worker cannot run on the 004 schema, and the new one cannot run on the old schema). Writes made after the migration are lost by the restore; tell Qiyam and JM first.
-14. `web/` dev portal still documents keyless reads (owner, out of scope).
-15. After deploy, check `GET /admin/scan` each hour for the first day: `last_run_at` moves and `stalled` is false (also glance at `consecutive_failures` and `skipped_ids`).
+Hosting (owner 2026-11-17): Sentral runs on its own Cloudflare account `7e72c27f3de3f130ec221a937ac22557` (which holds the `masjidsentral.com` zone), never on the JM account. v1.1 goes onto a **fresh D1 `masjidsentral-v2`**; the old D1 `masjidsentral` (`28e4a5dc-…`) is left untouched as the backup. This replaces the old in-place plan (no `d1_migrations` check, no reference-table diff, no Time Travel bookmark needed).
+
+1. Ship S1-S4 together, never S1 alone. Every read needs a key from now on; anything still calling the old `workers.dev` URL without a key gets 401 after step 9.
+2. **Token.** In the Sentral account create an API token limited to that account: Workers Scripts Edit, Workers Routes Edit, D1 Edit, Account Settings Read, plus zone `masjidsentral.com` Workers Routes Edit and DNS Edit (the custom domain). In the shell used for this repo only: `export CLOUDFLARE_ACCOUNT_ID=7e72c27f3de3f130ec221a937ac22557 CLOUDFLARE_API_TOKEN=…`. Leave the JM `wrangler login` as it is. Check with `npx wrangler whoami` that it shows the Sentral account before every command below.
+3. **Plan.** Upgrade the Sentral account to Workers Paid ($5). The free plan's 10 ms CPU per invocation is too tight for the hourly scan (Jaro-Winkler on 150 masjids).
+4. **Backup.** `npx wrangler d1 export masjidsentral --remote --output=<outside the repo>/masjidsentral-backup-2026-11.sql`. Keep the file; never commit it.
+5. **New D1.** `npx wrangler d1 create masjidsentral-v2`; paste its id into `wrangler.jsonc` (`REPLACE_WITH_NEW_D1_ID`).
+6. **Migrate.** `npx wrangler d1 migrations apply masjidsentral-v2 --remote` (applies 001-005). Check: `masjid_types` has `mini-surau` and no `musolla`; `api_keys` is empty (003 deletes 002's dev key); `facility_catalogue` has 30 rows.
+7. **Keys.** `node scripts/issue-key.mjs <app_id> <scopes>` and insert into `masjidsentral-v2`: `qiyam` (read,write), `jejak_masjid` (read,write), an admin key (admin), and a `webhook`-scoped key per receiving app (it needs an `app_id`; may be the app's own key with `read,write,webhook`).
+8. **Rate limit.** `namespace_id` "1001" is fine as long as no other Worker on the Sentral account uses it; 600 per 60 s.
+9. **Deploy** `npx wrangler deploy`. It replaces the old `api` Worker, attaches the custom domain `api.masjidsentral.com`, and registers two crons: `* * * * *` (webhook dispatch, idempotency sweep) and `0 * * * *` (duplicate scan, 150 masjids per run). Check both crons in the dashboard and that `GET https://api.masjidsentral.com/states` with a read key returns 200 (401 without).
+10. **Webhooks.** With the admin key: `POST /admin/webhooks { api_key_id, url }` for Qiyam and JM (https only; secret shown once; duplicate registration is 409 `already_exists`).
+11. Hand Qiyam the URL and key; Qiyam's link job first, JM's after. Watch `GET /admin/scan` (cursor, `masjids_remaining`, `last_error`) and the first `duplicate scan {...}` log lines.
+12. **Rollback = Worker rollback alone** (`npx wrangler rollback` to the version before step 9). The old Worker is bound to the untouched old D1, so it works as before. Writes made to `masjidsentral-v2` stay there but are not served; tell Qiyam and JM first. Never delete `masjidsentral-v2` during a rollback.
+13. After deploy, check `GET /admin/scan` each hour for the first day: `last_run_at` moves and `stalled` is false (also glance at `consecutive_failures` and `skipped_ids`).
+14. `web/` dev portal still documents keyless reads and the `workers.dev` URL (owner, out of scope).
+15. Retire the old D1 `masjidsentral` only after v1.1 has run cleanly for a few weeks and the step-4 export is safe (owner decision).
 
 ## S4 review fixes (2026-11-14, branch `feat/app-sync`, not merged/pushed/deployed)
 

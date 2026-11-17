@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://api.masjidsentral.workers.dev",
+      "url": "https://api.masjidsentral.com",
       "description": "Production"
     }
   ],

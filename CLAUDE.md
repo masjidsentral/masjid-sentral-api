@@ -15,7 +15,7 @@ Hono Worker on Cloudflare Workers + D1. It is the master copy of masjids and the
 
 ## Hard rules
 
-- Never `--remote`, never `wrangler deploy`, never apply migrations without `--local`. The owner deploys and migrates. The production D1 `masjidsentral` is on its own Cloudflare account (not JM's).
+- Never `--remote`, never `wrangler deploy`, never apply migrations without `--local`. The owner deploys and migrates. Sentral runs on its own Cloudflare account `7e72c27f3de3f130ec221a937ac22557` (owner 2026-11-17), which also holds the `masjidsentral.com` zone; never deploy it to the JM account `0283b7…`. Prod D1 = `masjidsentral-v2` (fresh for v1.1); the old `masjidsentral` D1 is a frozen backup. Wrangler for this repo uses an account-scoped `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, not the JM `wrangler login`.
 - Never edit an existing migration. Add a new numbered file.
 - Every request needs an API key, reads included. Keys are server-side only, so there is no CORS.
 - No personal data in the change log or logs. `X-Sentral-Actor` is an opaque app-local id.

@@ -9,7 +9,7 @@
 |---|---|
 | Status | **DRAFT v1.1**, 2026-11-14. Endpoints marked **NEW** are not deployed yet. |
 | Maintainers | Jejak Masjid (JM) × Qiyam |
-| Base URL | `https://api.masjidsentral.workers.dev` (prod). A staging URL is handed out with your key. |
+| Base URL | `https://api.masjidsentral.com` (prod). A staging URL is handed out with your key. |
 | Audience | Any app that reads or writes Masjid Sentral data (first: JM, Qiyam) |
 
 ---
